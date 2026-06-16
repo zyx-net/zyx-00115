@@ -31,9 +31,30 @@ async function initDatabase(forceReset) {
 }
 
 function runMigrations() {
-  const cols = all("PRAGMA table_info(reservations)").map(c => c.name);
-  if (!cols.includes('returned_qty')) {
+  const resCols = all("PRAGMA table_info(reservations)").map(c => c.name);
+  if (!resCols.includes('returned_qty')) {
     db.run('ALTER TABLE reservations ADD COLUMN returned_qty INTEGER NOT NULL DEFAULT 0');
+    saveToFile();
+  }
+  const setCols = all("PRAGMA table_info(weekly_settlements)").map(c => c.name);
+  if (!setCols.includes('source')) {
+    db.run("ALTER TABLE weekly_settlements ADD COLUMN source TEXT NOT NULL DEFAULT 'settled'");
+    saveToFile();
+  }
+  if (!setCols.includes('revoked')) {
+    db.run('ALTER TABLE weekly_settlements ADD COLUMN revoked INTEGER NOT NULL DEFAULT 0');
+    saveToFile();
+  }
+  if (!setCols.includes('created_by')) {
+    db.run('ALTER TABLE weekly_settlements ADD COLUMN created_by INTEGER REFERENCES users(id)');
+    saveToFile();
+  }
+  if (!setCols.includes('revoked_at')) {
+    db.run('ALTER TABLE weekly_settlements ADD COLUMN revoked_at TEXT');
+    saveToFile();
+  }
+  if (!setCols.includes('revoked_by')) {
+    db.run('ALTER TABLE weekly_settlements ADD COLUMN revoked_by INTEGER REFERENCES users(id)');
     saveToFile();
   }
 }
@@ -103,9 +124,14 @@ function createTables() {
   db.run(`
     CREATE TABLE IF NOT EXISTS weekly_settlements (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      week_key TEXT UNIQUE NOT NULL,
+      week_key TEXT NOT NULL,
       settled_at TEXT NOT NULL,
-      totals TEXT NOT NULL
+      totals TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'settled' CHECK(source IN ('settled','imported')),
+      revoked INTEGER NOT NULL DEFAULT 0,
+      created_by INTEGER REFERENCES users(id),
+      revoked_at TEXT,
+      revoked_by INTEGER REFERENCES users(id)
     );
   `);
   db.run(`
@@ -237,6 +263,29 @@ function getCurrentWeekKey() {
   return `${now.getFullYear()}-W${String(weekNum).padStart(2, '0')}`;
 }
 
+function getLatestSettlement() {
+  const row = get(
+    "SELECT * FROM weekly_settlements WHERE revoked = 0 AND source = 'settled' ORDER BY settled_at DESC, id DESC LIMIT 1"
+  );
+  return row;
+}
+
+function getActiveSettlementByWeek(weekKey) {
+  const rows = all(
+    "SELECT * FROM weekly_settlements WHERE week_key = ? AND revoked = 0 ORDER BY source ASC, settled_at DESC",
+    [weekKey]
+  );
+  return rows.length > 0 ? rows[0] : null;
+}
+
+function hasActiveSettlementByWeekAndSource(weekKey, source) {
+  const row = get(
+    "SELECT COUNT(*) AS cnt FROM weekly_settlements WHERE week_key = ? AND source = ? AND revoked = 0",
+    [weekKey, source]
+  );
+  return row && row.cnt > 0;
+}
+
 module.exports = {
   initDatabase,
   run,
@@ -246,5 +295,8 @@ module.exports = {
   saveToFile,
   forceSave,
   addLog,
-  getCurrentWeekKey
+  getCurrentWeekKey,
+  getLatestSettlement,
+  getActiveSettlementByWeek,
+  hasActiveSettlementByWeekAndSource
 };

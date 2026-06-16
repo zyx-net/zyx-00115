@@ -353,11 +353,14 @@ app.post('/api/settlements/weekly', requireRole('admin', 'lab_manager'), (req, r
   const { week_key } = req.body;
   const wk = week_key || db.getCurrentWeekKey();
 
-  const existing = db.get('SELECT * FROM weekly_settlements WHERE week_key = ?', [wk]);
-  if (existing) {
+  const existingSettled = db.get(
+    "SELECT * FROM weekly_settlements WHERE week_key = ? AND source = 'settled' AND revoked = 0",
+    [wk]
+  );
+  if (existingSettled) {
     db.addLog('duplicate_settlement_rejected', req.user.id, req.user.name, { week_key: wk });
     db.forceSave();
-    return res.status(409).json({ error: `${wk} 已完成结转，不可重复执行`, existing });
+    return res.status(409).json({ error: `${wk} 已完成结转，不可重复执行` });
   }
 
   const equipment = db.all('SELECT * FROM equipment ORDER BY id');
@@ -399,8 +402,8 @@ app.post('/api/settlements/weekly', requireRole('admin', 'lab_manager'), (req, r
 
   const now = new Date().toISOString();
   db.run(
-    'INSERT INTO weekly_settlements (week_key, settled_at, totals) VALUES (?, ?, ?)',
-    [wk, now, JSON.stringify(totals)]
+    "INSERT INTO weekly_settlements (week_key, settled_at, totals, source, created_by) VALUES (?, ?, ?, 'settled', ?)",
+    [wk, now, JSON.stringify(totals), req.user.id]
   );
 
   db.addLog('weekly_settlement', req.user.id, req.user.name, {
@@ -408,16 +411,192 @@ app.post('/api/settlements/weekly', requireRole('admin', 'lab_manager'), (req, r
   });
   db.forceSave();
 
-  const settlement = db.get('SELECT * FROM weekly_settlements WHERE week_key = ?', [wk]);
+  const settlement = db.get(
+    "SELECT * FROM weekly_settlements WHERE week_key = ? AND source = 'settled' AND revoked = 0 ORDER BY id DESC LIMIT 1",
+    [wk]
+  );
   settlement.totals = JSON.parse(settlement.totals);
 
   res.json(settlement);
 });
 
+app.delete('/api/settlements/:week_key/revoke', requireRole('admin', 'lab_manager'), (req, res) => {
+  const wk = req.params.week_key;
+
+  const target = db.get(
+    "SELECT * FROM weekly_settlements WHERE week_key = ? AND source = 'settled' AND revoked = 0",
+    [wk]
+  );
+  if (!target) {
+    db.addLog('revoke_settlement_not_found', req.user.id, req.user.name, { week_key: wk });
+    db.forceSave();
+    return res.status(404).json({ error: `${wk} 没有可撤销的有效结转记录` });
+  }
+
+  const latest = db.getLatestSettlement();
+  if (!latest || latest.id !== target.id) {
+    db.addLog('revoke_settlement_not_latest', req.user.id, req.user.name, {
+      week_key: wk,
+      latest_week: latest ? latest.week_key : null
+    });
+    db.forceSave();
+    return res.status(400).json({
+      error: `只能撤销最新周次的结转，当前最新周次为 ${latest ? latest.week_key : '无'}`
+    });
+  }
+
+  const now = new Date().toISOString();
+  db.run(
+    'UPDATE weekly_settlements SET revoked = 1, revoked_at = ?, revoked_by = ? WHERE id = ?',
+    [now, req.user.id, target.id]
+  );
+
+  const totals = JSON.parse(target.totals);
+  db.addLog('revoke_weekly_settlement', req.user.id, req.user.name, {
+    week_key: wk,
+    settlement_id: target.id,
+    original_settled_at: target.settled_at,
+    equipment_count: totals.equipment_snapshot ? totals.equipment_snapshot.length : 0,
+    reservation_total: totals.reservation_summary ? totals.reservation_summary.total : 0,
+    loss_qty: totals.loss_summary ? totals.loss_summary.total_qty : 0,
+    pending_returns: totals.pending_returns ? totals.pending_returns.length : 0
+  });
+  db.forceSave();
+
+  res.json({
+    ok: true,
+    week_key: wk,
+    revoked_at: now,
+    message: `${wk} 周结转已撤销，可重新执行结转`
+  });
+});
+
+app.post('/api/settlements/import', requireRole('admin', 'lab_manager'), (req, res) => {
+  const data = req.body;
+  if (!data || typeof data !== 'object') {
+    return res.status(400).json({ error: '导入数据格式错误，需要 JSON 对象' });
+  }
+
+  const { week_key, settled_at, totals } = data;
+  if (!week_key || typeof week_key !== 'string') {
+    return res.status(400).json({ error: '缺少 week_key 字段' });
+  }
+  if (!totals || typeof totals !== 'object') {
+    return res.status(400).json({ error: '缺少 totals 字段或格式错误' });
+  }
+  if (!totals.equipment_snapshot || !Array.isArray(totals.equipment_snapshot)) {
+    return res.status(400).json({ error: 'totals.equipment_snapshot 缺失或非数组' });
+  }
+  if (!totals.reservation_summary || typeof totals.reservation_summary !== 'object') {
+    return res.status(400).json({ error: 'totals.reservation_summary 缺失' });
+  }
+  if (!totals.loss_summary || typeof totals.loss_summary !== 'object') {
+    return res.status(400).json({ error: 'totals.loss_summary 缺失' });
+  }
+  if (!totals.pending_returns || !Array.isArray(totals.pending_returns)) {
+    return res.status(400).json({ error: 'totals.pending_returns 缺失或非数组' });
+  }
+
+  const existingSettled = db.get(
+    "SELECT * FROM weekly_settlements WHERE week_key = ? AND source = 'settled' AND revoked = 0",
+    [week_key]
+  );
+  if (existingSettled) {
+    db.addLog('import_settlement_duplicate_settled', req.user.id, req.user.name, { week_key });
+    db.forceSave();
+    return res.status(409).json({
+      error: `${week_key} 已存在正式结转记录，导入被拒绝（不能覆盖正式数据）`,
+      conflict: 'official_exists'
+    });
+  }
+
+  const existingImported = db.get(
+    "SELECT * FROM weekly_settlements WHERE week_key = ? AND source = 'imported' AND revoked = 0",
+    [week_key]
+  );
+  if (existingImported) {
+    db.addLog('import_settlement_duplicate_imported', req.user.id, req.user.name, { week_key });
+    db.forceSave();
+    return res.status(409).json({
+      error: `${week_key} 已存在导入记录，如需重新导入请先撤销原导入记录`,
+      conflict: 'imported_exists'
+    });
+  }
+
+  const useSettledAt = settled_at && typeof settled_at === 'string' ? settled_at : new Date().toISOString();
+  const now = new Date().toISOString();
+
+  db.run(
+    "INSERT INTO weekly_settlements (week_key, settled_at, totals, source, created_by) VALUES (?, ?, ?, 'imported', ?)",
+    [week_key, useSettledAt, JSON.stringify(totals), req.user.id]
+  );
+
+  db.addLog('import_weekly_settlement', req.user.id, req.user.name, {
+    week_key,
+    original_settled_at: useSettledAt,
+    imported_at: now,
+    equipment_count: totals.equipment_snapshot.length,
+    reservation_total: totals.reservation_summary.total,
+    loss_qty: totals.loss_summary.total_qty,
+    pending_returns: totals.pending_returns.length
+  });
+  db.forceSave();
+
+  const imported = db.get(
+    "SELECT * FROM weekly_settlements WHERE week_key = ? AND source = 'imported' AND revoked = 0 ORDER BY id DESC LIMIT 1",
+    [week_key]
+  );
+  imported.totals = JSON.parse(imported.totals);
+
+  res.status(201).json(imported);
+});
+
+app.delete('/api/settlements/:week_key/remove-import', requireRole('admin', 'lab_manager'), (req, res) => {
+  const wk = req.params.week_key;
+  const target = db.get(
+    "SELECT * FROM weekly_settlements WHERE week_key = ? AND source = 'imported' AND revoked = 0",
+    [wk]
+  );
+  if (!target) {
+    return res.status(404).json({ error: `${wk} 没有可移除的导入结转记录` });
+  }
+  const now = new Date().toISOString();
+  db.run(
+    'UPDATE weekly_settlements SET revoked = 1, revoked_at = ?, revoked_by = ? WHERE id = ?',
+    [now, req.user.id, target.id]
+  );
+  db.addLog('remove_imported_settlement', req.user.id, req.user.name, {
+    week_key: wk, settlement_id: target.id
+  });
+  db.forceSave();
+  res.json({ ok: true, week_key: wk, revoked_at: now });
+});
+
 app.get('/api/settlements', requireAuth, (req, res) => {
-  const list = db.all('SELECT * FROM weekly_settlements ORDER BY settled_at DESC');
-  list.forEach(s => { s.totals = JSON.parse(s.totals); });
+  const list = db.all(
+    "SELECT * FROM weekly_settlements WHERE revoked = 0 ORDER BY settled_at DESC, id DESC"
+  );
+  const latest = db.getLatestSettlement();
+  const latestId = latest ? latest.id : null;
+  list.forEach(s => {
+    s.totals = JSON.parse(s.totals);
+    s.is_latest_settled = s.source === 'settled' && s.id === latestId;
+  });
   res.json(list);
+});
+
+app.get('/api/settlements/latest-info', requireAuth, (req, res) => {
+  const latest = db.getLatestSettlement();
+  if (latest) {
+    res.json({
+      has_latest: true,
+      week_key: latest.week_key,
+      id: latest.id,
+      settled_at: latest.settled_at
+    });
+  } else {
+    res.json({ has_latest: false });
+  }
 });
 
 app.get('/api/logs', requireAuth, (req, res) => {
@@ -430,11 +609,16 @@ app.get('/api/logs', requireAuth, (req, res) => {
 
 app.get('/api/export/:week_key', requireAuth, (req, res) => {
   const wk = req.params.week_key;
-  const settlement = db.get('SELECT * FROM weekly_settlements WHERE week_key = ?', [wk]);
-  if (!settlement) return res.status(404).json({ error: `${wk} 未找到结转记录` });
+  const source = req.query.source || 'settled';
+  const validSource = ['settled', 'imported'].includes(source) ? source : 'settled';
+  const settlement = db.get(
+    `SELECT * FROM weekly_settlements WHERE week_key = ? AND source = ? AND revoked = 0 ORDER BY id DESC LIMIT 1`,
+    [wk, validSource]
+  );
+  if (!settlement) return res.status(404).json({ error: `${wk} 未找到有效的${validSource === 'imported' ? '导入' : ''}结转记录` });
 
   settlement.totals = JSON.parse(settlement.totals);
-  res.setHeader('Content-Disposition', `attachment; filename="settlement-${wk}.json"`);
+  res.setHeader('Content-Disposition', `attachment; filename="settlement-${wk}-${validSource}.json"`);
   res.setHeader('Content-Type', 'application/json');
   res.json(settlement);
 });
@@ -444,7 +628,7 @@ app.get('/api/dashboard', requireAuth, (req, res) => {
   const reservationStats = db.all("SELECT status, COUNT(*) AS cnt FROM reservations GROUP BY status");
   const lossStats = db.all("SELECT status, COUNT(*) AS cnt FROM loss_reports GROUP BY status");
   const pendingReturns = db.all("SELECT COUNT(*) AS cnt FROM reservations WHERE status IN ('collected','partially_returned')");
-  const latestSettlement = db.get('SELECT * FROM weekly_settlements ORDER BY settled_at DESC LIMIT 1');
+  const latestSettlement = db.getLatestSettlement();
 
   if (latestSettlement) {
     try { latestSettlement.totals = JSON.parse(latestSettlement.totals); } catch(e) {}

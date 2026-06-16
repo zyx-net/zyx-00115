@@ -269,7 +269,11 @@ async function loadSettlements() {
   const settlements = await api('GET', '/api/settlements');
   const ab = document.getElementById('settlement-actions');
   if (['admin','lab_manager'].includes(currentUser.role)) {
-    ab.innerHTML = '<button class="btn btn-primary" onclick="showSettlementModal()">执行周结转</button>';
+    ab.innerHTML = `
+      <button class="btn btn-primary" onclick="showSettlementModal()">+ 执行周结转</button>
+      <button class="btn btn-secondary" onclick="showImportModal()" style="margin-left:8px">📤 导入结转 JSON</button>
+      <button class="btn btn-danger" onclick="showRevokeLatestModal()" style="margin-left:8px">↩️ 撤销最近结转</button>
+    `;
   } else {
     ab.innerHTML = '';
   }
@@ -279,8 +283,11 @@ async function loadSettlements() {
     h = '<div class="empty-state">暂无结转记录</div>';
   } else {
     settlements.forEach(s => {
+      const sourceBadge = s.source === 'imported'
+        ? ' <span class="source-badge source-imported">📁 导入视图</span>'
+        : (s.is_latest_settled ? ' <span class="source-badge source-latest">⭐ 最新结转</span>' : '');
       h += '<div class="settlement-card">';
-      h += `<div class="settlement-header"><h3>周次: ${s.week_key}</h3><span class="settlement-time">${new Date(s.settled_at).toLocaleString()}</span></div>`;
+      h += `<div class="settlement-header"><h3>周次: ${s.week_key}${sourceBadge}</h3><span class="settlement-time">${new Date(s.settled_at).toLocaleString()}</span></div>`;
       h += '<div class="settlement-body">';
       h += '<h4>器材快照</h4><table class="data-table compact"><thead><tr><th>器材</th><th>总量</th><th>可用</th><th>锁定</th></tr></thead><tbody>';
       s.totals.equipment_snapshot.forEach(eq => {
@@ -302,11 +309,117 @@ async function loadSettlements() {
         });
         h += '</tbody></table>';
       }
-      h += `<div style="margin-top:12px"><a href="/api/export/${s.week_key}" class="btn btn-sm btn-info" target="_blank">📥 导出结转数据</a></div>`;
+      h += '<div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">';
+      const exportSrc = s.source === 'imported' ? '?source=imported' : '';
+      h += `<a href="/api/export/${s.week_key}${exportSrc}" class="btn btn-sm btn-info" target="_blank">📥 导出结转数据</a>`;
+      if (s.source === 'settled' && s.is_latest_settled && ['admin','lab_manager'].includes(currentUser.role)) {
+        h += `<button class="btn btn-sm btn-danger" onclick="showRevokeModal('${s.week_key}')">↩️ 撤销此结转</button>`;
+      }
+      if (s.source === 'imported' && ['admin','lab_manager'].includes(currentUser.role)) {
+        h += `<button class="btn btn-sm btn-warning" onclick="removeImported('${s.week_key}')">🗑️ 移除导入</button>`;
+      }
+      h += '</div>';
       h += '</div></div>';
     });
   }
   document.getElementById('settlement-list').innerHTML = h;
+}
+
+async function showRevokeLatestModal() {
+  try {
+    const info = await api('GET', '/api/settlements/latest-info');
+    if (!info.has_latest) {
+      toast('当前没有可撤销的结转记录', 'warn');
+      return;
+    }
+    showRevokeModal(info.week_key);
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function showRevokeModal(weekKey) {
+  let h = `<p>确认要撤销 <strong>${weekKey}</strong> 周的结转吗？</p>`;
+  h += '<ul class="form-hint" style="padding-left:20px;margin:8px 0">';
+  h += '<li>撤销后该周的器材快照、预约汇总、损耗汇总、待归还列表将不再出现在结转视图中</li>';
+  h += '<li>仅允许撤销最新周次的结转</li>';
+  h += '<li>撤销后可以重新对该周执行结转</li>';
+  h += '<li>操作日志会保留完整记录</li>';
+  h += '</ul>';
+  h += `<p class="form-hint" style="color:#e74c3c">⚠️ 此操作不可重复回滚，请确认无误后再继续。</p>`;
+  h += `<div style="margin-top:16px;display:flex;gap:8px">`;
+  h += `<button id="revoke-confirm-btn" class="btn btn-danger" style="flex:1">确认撤销 ${weekKey}</button>`;
+  h += `<button id="revoke-cancel-btn" class="btn" style="flex:1;background:#eee;color:#555">取消</button>`;
+  h += `</div>`;
+  showModal('撤销周结转', h);
+  document.getElementById('revoke-cancel-btn').onclick = closeModal;
+  document.getElementById('revoke-confirm-btn').onclick = async () => {
+    const btn = document.getElementById('revoke-confirm-btn');
+    btn.disabled = true;
+    btn.textContent = '撤销中...';
+    try {
+      const r = await api('DELETE', `/api/settlements/${weekKey}/revoke`);
+      closeModal();
+      toast(r.message || `${weekKey} 结转已撤销`);
+      loadSettlements();
+      if (typeof loadDashboard === 'function') loadDashboard();
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = `确认撤销 ${weekKey}`;
+      toast(e.message, 'error');
+    }
+  };
+}
+
+function showImportModal() {
+  let h = '<div class="form-group"><label>选择结转 JSON 文件</label>';
+  h += '<input type="file" id="import-file" accept=".json,application/json" required>';
+  h += '<p class="form-hint">请选择之前通过"导出结转数据"下载的 JSON 文件。</p>';
+  h += '<p class="form-hint" style="color:#17a2b8">💡 导入的结转仅作为视图展示，不会影响或覆盖当前业务数据。</p>';
+  h += '<p class="form-hint" style="color:#e74c3c">⚠️ 如果该周已存在正式结转记录，导入将被拒绝。</p>';
+  h += '</div>';
+  h += `<div style="margin-top:16px;display:flex;gap:8px">`;
+  h += `<button id="import-confirm-btn" class="btn btn-primary" style="flex:1">开始导入</button>`;
+  h += `<button id="import-cancel-btn" class="btn" style="flex:1;background:#eee;color:#555">取消</button>`;
+  h += `</div>`;
+  showModal('导入结转 JSON', h);
+  document.getElementById('import-cancel-btn').onclick = closeModal;
+  document.getElementById('import-confirm-btn').onclick = async () => {
+    const fileInput = document.getElementById('import-file');
+    const file = fileInput.files[0];
+    if (!file) { toast('请先选择文件', 'warn'); return; }
+    const btn = document.getElementById('import-confirm-btn');
+    btn.disabled = true;
+    btn.textContent = '导入中...';
+    try {
+      const text = await file.text();
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        throw new Error('JSON 解析失败，请确认文件格式正确');
+      }
+      const r = await api('POST', '/api/settlements/import', data);
+      closeModal();
+      toast(`导入成功：${r.week_key}`);
+      loadSettlements();
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = '开始导入';
+      toast(e.message, 'error');
+    }
+  };
+}
+
+async function removeImported(weekKey) {
+  if (!confirm(`确认移除导入的 ${weekKey} 结转视图吗？`)) return;
+  try {
+    await api('DELETE', `/api/settlements/${weekKey}/remove-import`);
+    toast(`已移除导入的 ${weekKey} 结转视图`);
+    loadSettlements();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
 }
 
 async function showSettlementModal() {
