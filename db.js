@@ -107,9 +107,36 @@ function runMigrations() {
         row_count INTEGER NOT NULL DEFAULT 0,
         created_by INTEGER REFERENCES users(id),
         created_by_name TEXT,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        invalid INTEGER NOT NULL DEFAULT 0,
+        invalidated_at TEXT,
+        invalidated_by INTEGER REFERENCES users(id),
+        invalidated_reason TEXT,
+        last_cleaned_stats TEXT
       );
     `);
+    saveToFile();
+  }
+
+  const expCols = all("PRAGMA table_info(settlement_exports)").map(c => c.name);
+  if (!expCols.includes('invalid')) {
+    db.run('ALTER TABLE settlement_exports ADD COLUMN invalid INTEGER NOT NULL DEFAULT 0');
+    saveToFile();
+  }
+  if (!expCols.includes('invalidated_at')) {
+    db.run('ALTER TABLE settlement_exports ADD COLUMN invalidated_at TEXT');
+    saveToFile();
+  }
+  if (!expCols.includes('invalidated_by')) {
+    db.run('ALTER TABLE settlement_exports ADD COLUMN invalidated_by INTEGER REFERENCES users(id)');
+    saveToFile();
+  }
+  if (!expCols.includes('invalidated_reason')) {
+    db.run('ALTER TABLE settlement_exports ADD COLUMN invalidated_reason TEXT');
+    saveToFile();
+  }
+  if (!expCols.includes('last_cleaned_stats')) {
+    db.run('ALTER TABLE settlement_exports ADD COLUMN last_cleaned_stats TEXT');
     saveToFile();
   }
 }
@@ -237,7 +264,12 @@ function createTables() {
       row_count INTEGER NOT NULL DEFAULT 0,
       created_by INTEGER REFERENCES users(id),
       created_by_name TEXT,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      invalid INTEGER NOT NULL DEFAULT 0,
+      invalidated_at TEXT,
+      invalidated_by INTEGER REFERENCES users(id),
+      invalidated_reason TEXT,
+      last_cleaned_stats TEXT
     );
   `);
 }
@@ -411,19 +443,17 @@ function countRelatedCleanup(settlementId) {
   };
 }
 
-function cleanupSettlementRelatedData(settlementId) {
-  run(
-    `DELETE FROM settlement_exports
-     WHERE comparison_id IN (
-       SELECT id FROM settlement_comparisons WHERE settlement_a_id = ? OR settlement_b_id = ?
-     )`,
-    [settlementId, settlementId]
-  );
-  run('DELETE FROM settlement_exports WHERE settlement_id = ?', [settlementId]);
+function cleanupSettlementRelatedData(settlementId, invalidatedBy = null, invalidatedReason = null) {
+  const relatedCount = countRelatedCleanup(settlementId);
+
+  if (invalidatedBy) {
+    invalidateExportsBySettlementId(settlementId, invalidatedBy, invalidatedReason, relatedCount);
+  }
+
   run('DELETE FROM settlement_comparisons WHERE settlement_a_id = ? OR settlement_b_id = ?', [settlementId, settlementId]);
   run('DELETE FROM settlement_notes WHERE settlement_id = ?', [settlementId]);
   saveToFile();
-  return countRelatedCleanup(settlementId);
+  return relatedCount;
 }
 
 function getNotesBySettlementId(settlementId) {
@@ -531,6 +561,233 @@ function computeSettlementDiff(settlementA, settlementB) {
   return result;
 }
 
+function getRelatedNoteCount(settlementId) {
+  const row = get(
+    "SELECT COUNT(*) AS cnt FROM settlement_notes WHERE settlement_id = ?",
+    [settlementId]
+  );
+  return row ? row.cnt : 0;
+}
+
+function getLatestCleanedStats(settlementId) {
+  const logs = all(
+    `SELECT details FROM operation_logs
+     WHERE action IN ('revoke_weekly_settlement', 'remove_imported_settlement')
+     AND details LIKE ?
+     ORDER BY created_at DESC LIMIT 1`,
+    [`%"settlement_id":${settlementId}%`]
+  );
+  if (logs.length === 0) return null;
+  try {
+    const details = JSON.parse(logs[0].details);
+    return {
+      cleaned_notes: details.cleaned_notes || 0,
+      cleaned_comparisons: details.cleaned_comparisons || 0,
+      cleaned_exports_single: details.cleaned_exports_single || 0,
+      cleaned_exports_comparison: details.cleaned_exports_comparison || 0,
+      cleaned_exports_total: details.cleaned_exports_total || 0
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
+function invalidateExportsBySettlementId(settlementId, invalidatedBy, invalidatedReason, cleanedStats) {
+  const now = new Date().toISOString();
+  let statsToSave = null;
+  if (cleanedStats) {
+    statsToSave = {
+      cleaned_notes: cleanedStats.notes || 0,
+      cleaned_comparisons: cleanedStats.comparisons || 0,
+      cleaned_exports_single: cleanedStats.exports_single || 0,
+      cleaned_exports_comparison: cleanedStats.exports_comparison || 0,
+      cleaned_exports_total: cleanedStats.exports_total || 0
+    };
+  }
+  const statsJson = statsToSave ? JSON.stringify(statsToSave) : null;
+
+  run(
+    `UPDATE settlement_exports SET
+       invalid = 1,
+       invalidated_at = ?,
+       invalidated_by = ?,
+       invalidated_reason = ?,
+       last_cleaned_stats = ?
+     WHERE settlement_id = ?`,
+    [now, invalidatedBy, invalidatedReason, statsJson, settlementId]
+  );
+
+  run(
+    `UPDATE settlement_exports SET
+       invalid = 1,
+       invalidated_at = ?,
+       invalidated_by = ?,
+       invalidated_reason = ?,
+       last_cleaned_stats = ?
+     WHERE comparison_id IN (
+       SELECT id FROM settlement_comparisons WHERE settlement_a_id = ? OR settlement_b_id = ?
+     )`,
+    [now, invalidatedBy, invalidatedReason, statsJson, settlementId, settlementId]
+  );
+
+  saveToFile();
+}
+
+function getLedgerExports(filters = {}) {
+  let sql = `
+    SELECT se.*,
+           u.name AS created_by_user_name,
+           iv.name AS invalidated_by_user_name
+    FROM settlement_exports se
+    LEFT JOIN users u ON se.created_by = u.id
+    LEFT JOIN users iv ON se.invalidated_by = iv.id
+    WHERE 1=1
+  `;
+  const params = [];
+
+  if (filters.week_key_start) {
+    sql += " AND (se.week_key_a >= ? OR se.week_key_b >= ?)";
+    params.push(filters.week_key_start, filters.week_key_start);
+  }
+  if (filters.week_key_end) {
+    sql += " AND (se.week_key_a <= ? OR se.week_key_b <= ?)";
+    params.push(filters.week_key_end, filters.week_key_end);
+  }
+  if (filters.export_type) {
+    sql += " AND se.type = ?";
+    params.push(filters.export_type);
+  }
+  if (filters.export_format) {
+    sql += " AND se.export_format = ?";
+    params.push(filters.export_format);
+  }
+  if (filters.created_by) {
+    sql += " AND se.created_by = ?";
+    params.push(filters.created_by);
+  }
+  if (filters.invalid !== undefined && filters.invalid !== null) {
+    sql += " AND se.invalid = ?";
+    params.push(filters.invalid ? 1 : 0);
+  }
+
+  sql += " ORDER BY se.created_at DESC LIMIT 500";
+
+  const rows = all(sql, params);
+
+  rows.forEach(row => {
+    if (row.last_cleaned_stats) {
+      try {
+        row.last_cleaned_stats = JSON.parse(row.last_cleaned_stats);
+      } catch (e) {
+        row.last_cleaned_stats = null;
+      }
+    }
+    if (row.settlement_id) {
+      row.related_note_count = getRelatedNoteCount(row.settlement_id);
+      if (!row.last_cleaned_stats) {
+        row.last_cleaned_stats = getLatestCleanedStats(row.settlement_id);
+      }
+    } else {
+      row.related_note_count = 0;
+    }
+  });
+
+  return rows;
+}
+
+function getLedgerExportById(id) {
+  const row = get(
+    `SELECT se.*,
+            u.name AS created_by_user_name,
+            iv.name AS invalidated_by_user_name,
+            sc.settlement_a_id, sc.settlement_b_id,
+            sc.diff_summary AS comparison_diff_summary
+     FROM settlement_exports se
+     LEFT JOIN users u ON se.created_by = u.id
+     LEFT JOIN users iv ON se.invalidated_by = iv.id
+     LEFT JOIN settlement_comparisons sc ON se.comparison_id = sc.id
+     WHERE se.id = ?`,
+    [id]
+  );
+
+  if (!row) return null;
+
+  if (row.last_cleaned_stats) {
+    try {
+      row.last_cleaned_stats = JSON.parse(row.last_cleaned_stats);
+    } catch (e) {
+      row.last_cleaned_stats = null;
+    }
+  }
+  if (row.comparison_diff_summary) {
+    try {
+      row.comparison_diff_summary = JSON.parse(row.comparison_diff_summary);
+    } catch (e) {
+      row.comparison_diff_summary = null;
+    }
+  }
+  if (row.settlement_id) {
+    row.related_note_count = getRelatedNoteCount(row.settlement_id);
+    if (!row.last_cleaned_stats) {
+      row.last_cleaned_stats = getLatestCleanedStats(row.settlement_id);
+    }
+  } else {
+    row.related_note_count = 0;
+  }
+
+  return row;
+}
+
+function getLedgerSummary(filters = {}) {
+  let sql = `
+    SELECT
+      COUNT(*) AS total_count,
+      SUM(CASE WHEN se.type = 'single' THEN 1 ELSE 0 END) AS single_count,
+      SUM(CASE WHEN se.type = 'comparison' THEN 1 ELSE 0 END) AS comparison_count,
+      SUM(CASE WHEN se.invalid = 1 THEN 1 ELSE 0 END) AS invalid_count,
+      SUM(CASE WHEN se.invalid = 0 THEN 1 ELSE 0 END) AS valid_count,
+      SUM(se.row_count) AS total_rows
+    FROM settlement_exports se
+    WHERE 1=1
+  `;
+  const params = [];
+
+  if (filters.week_key_start) {
+    sql += " AND (se.week_key_a >= ? OR se.week_key_b >= ?)";
+    params.push(filters.week_key_start, filters.week_key_start);
+  }
+  if (filters.week_key_end) {
+    sql += " AND (se.week_key_a <= ? OR se.week_key_b <= ?)";
+    params.push(filters.week_key_end, filters.week_key_end);
+  }
+  if (filters.export_type) {
+    sql += " AND se.type = ?";
+    params.push(filters.export_type);
+  }
+  if (filters.export_format) {
+    sql += " AND se.export_format = ?";
+    params.push(filters.export_format);
+  }
+  if (filters.created_by) {
+    sql += " AND se.created_by = ?";
+    params.push(filters.created_by);
+  }
+  if (filters.invalid !== undefined && filters.invalid !== null) {
+    sql += " AND se.invalid = ?";
+    params.push(filters.invalid ? 1 : 0);
+  }
+
+  const row = get(sql, params);
+  return row || {
+    total_count: 0,
+    single_count: 0,
+    comparison_count: 0,
+    invalid_count: 0,
+    valid_count: 0,
+    total_rows: 0
+  };
+}
+
 module.exports = {
   initDatabase,
   run,
@@ -547,5 +804,11 @@ module.exports = {
   countRelatedCleanup,
   cleanupSettlementRelatedData,
   getNotesBySettlementId,
-  computeSettlementDiff
+  computeSettlementDiff,
+  getRelatedNoteCount,
+  getLatestCleanedStats,
+  invalidateExportsBySettlementId,
+  getLedgerExports,
+  getLedgerExportById,
+  getLedgerSummary
 };

@@ -181,6 +181,47 @@ npm start
    - **再次做一次结转→对比→导出→撤销的完整链路**：撤销日志中的 `cleaned_exports_total`、`cleaned_exports_comparison` 字段重启后仍正确计算（不会出现旧实现那样记成 0 的情况）
    - 查看「操作日志」：撤销、导入、**添加/修改/删除说明、对比、导出**的日志全部保留，所有 `revoke_weekly_settlement` / `remove_imported_settlement` 的 details 中包含 5 项 `cleaned_*` 统计字段
 
+### 步骤 13: 导出复盘台账（管理员/实验员专属）
+
+**目的**: 管理员和实验员可以在台账中追溯所有导出操作的完整历史，包括失效记录，支持多维度筛选和台账导出。教师角色无法访问。
+
+1. 登录 `admin / admin123` 或 `wangwu / 123456`（管理员/实验员角色）
+2. 调用台账列表接口 `GET /api/settlements/ledger`，支持以下筛选参数：
+   - `week_start` / `week_end`: 周次范围筛选（如 `week_start=2026-W20&week_end=2026-W30`）
+   - `type`: 导出类型筛选（`single`=单周 JSON / `comparison`=对比 CSV）
+   - `operator`: 操作人用户名筛选
+   - `invalid`: 是否失效筛选（`0`=有效 / `1`=失效 / 不传=全部）
+   - 示例：`GET /api/settlements/ledger?type=single&invalid=0&operator=admin`
+3. 列表字段说明：
+   - `week_key_a` / `week_key_b`: 来源周次（对比 CSV 有两个周次，单周 JSON 只有 week_key_a）
+   - `filename`: 导出文件名
+   - `row_count`: 导出数据行数
+   - `related_note_count`: 关联说明条数
+   - `last_cleaned_stats`: 最近一次清理统计（包含 `cleaned_notes`、`cleaned_exports_total` 等 5 项）
+   - `invalid`: 是否失效（0=有效，1=失效）
+   - `invalidated_at` / `invalidated_by` / `invalidated_reason`: 失效时间/失效人/失效原因
+4. 调用台账详情接口 `GET /api/settlements/ledger/:id`，可看到：
+   - `type`: 区分 `single`（普通 JSON）还是 `comparison`（对比 CSV）
+   - `comparison_id`: 关联的对比记录 ID（仅对比 CSV 有值）
+   - `operator_username`: 操作人用户名
+   - `created_at`: 导出时间
+5. 调用台账导出接口 `GET /api/settlements/ledger/export/csv`，可导出完整台账 CSV（UTF-8 BOM，Excel 可直接打开）
+6. 台账与操作联动验证：
+   - **撤销结转**：该周次关联的所有导出记录自动标记为失效，失效原因为「周结转已撤销」，`invalidated_by` 标记操作人
+   - **移除导入**：该周次关联的所有导出记录自动标记为失效，失效原因为「导入视图已移除」
+   - **再次导出同一周次**：产生新的有效记录，旧记录保持原状态不变（有效继续有效，失效继续失效）
+7. 权限验证：
+   - 登录 `zhangsan / 123456`（教师角色）
+   - 调用 `GET /api/settlements/ledger` → 返回 403「权限不足」
+   - 调用 `GET /api/settlements/ledger/export/csv` → 返回 403「权限不足」
+   - 教师只能看普通结转和差异对比，不能进入台账
+8. 重启验证：
+   - 停止服务器后重启，台账的筛选结果、统计口径、失效状态、清理统计数据**完全一致**
+   - 重启后再次执行撤销/导出操作，联动逻辑正常工作
+
+**台账 CSV 导出字段**（共 19 列）：
+`id, week_key_a, week_key_b, type, filename, row_count, comparison_id, comparison_name, created_at, operator_id, operator_username, invalid, invalidated_at, invalidated_by, invalidated_reason, last_cleaned_stats, related_note_count, settlement_id, settlement_b_id`
+
 ---
 
 ## 失败路径演示
@@ -279,6 +320,48 @@ npm start
 | **修改/删除结转说明** | ❌ | ✅（自己创建的或任意） | ✅ |
 | **撤销后自动收口：对比入口 / CSV导出记录（含 comparison 关联） / 说明关联 / exports 列表失效项过滤** | ✅（自动生效+404拦截） | ✅（自动生效+日志 cleaned_* 5 项字段） | ✅（自动生效+日志 cleaned_* 5 项字段） |
 | **查看结转说明** | ✅ | ✅ | ✅ |
+| **导出复盘台账 - 列表/筛选** | ❌ | ✅ | ✅ |
+| **导出复盘台账 - 详情查看** | ❌ | ✅ | ✅ |
+| **导出复盘台账 - CSV 导出** | ❌ | ✅ | ✅ |
+| **台账联动：撤销/移除导入时自动标记失效** | ❌ | ✅（自动收口，保留历史） | ✅（自动收口，保留历史） |
+
+## 使用限制和注意事项
+
+### 导出复盘台账限制
+
+1. **角色权限限制**：
+   - 仅管理员（admin）和实验员（lab_manager）可访问台账功能
+   - 教师角色无台账访问权限，所有台账 API 返回 403
+   - 教师可正常使用普通结转、差异对比查看功能，但不能导出台账
+
+2. **数据保留机制**：
+   - 台账记录采用**软失效机制**，永不物理删除
+   - 撤销结转、移除导入时，关联的导出记录仅标记 `invalid=1`
+   - 失效记录保留完整的失效原因、失效时间、失效人、清理统计信息
+   - 再次导出同一周次时，产生新的有效记录，旧记录状态保持不变
+
+3. **筛选和统计口径**：
+   - 台账列表默认显示全部记录（有效+失效），可通过 `invalid` 参数筛选
+   - 周次范围筛选仅作用于 `week_key_a`（单周和对比 CSV 的 A 周）
+   - `related_note_count` 为实时计算的关联说明条数，不受失效标记影响
+   - `last_cleaned_stats` 存储该记录最后一次被清理时的统计数据（含 `cleaned_*` 前缀）
+
+4. **联动规则**：
+   - 撤销结转：该周次（作为 A 周或 B 周）关联的所有导出记录全部失效
+   - 移除导入：该导入周次关联的所有导出记录全部失效
+   - 再次导出：产生新记录，不影响历史记录状态
+   - 所有联动操作均记录操作日志（`revoke_weekly_settlement` / `remove_imported_settlement`），日志中包含 5 项 `cleaned_*` 清理统计
+
+5. **重启一致性保证**：
+   - 台账数据完全持久化在 SQLite 数据库中
+   - 重启后筛选结果、统计口径、失效状态、清理统计完全一致
+   - 重启后联动逻辑正常工作，无状态丢失
+
+### 其他限制
+
+- 撤销只能操作最新周次的正式结转记录
+- 导入只能作为视图存在，不能覆盖正式结转数据
+- 教师不能审批自己提交的损耗申报
 
 ## 技术架构
 

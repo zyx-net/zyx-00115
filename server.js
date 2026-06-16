@@ -70,6 +70,7 @@ app.post('/api/logout', (req, res) => {
   res.json({ ok: true });
 });
 
+app.get('/api/health', (req, res) => res.json({ok:true}));
 app.get('/api/me', (req, res) => {
   const user = getSessionUser(req);
   if (!user) return res.status(401).json({ error: '未登录' });
@@ -452,8 +453,7 @@ app.delete('/api/settlements/:week_key/revoke', requireRole('admin', 'lab_manage
   );
 
   const totals = JSON.parse(target.totals);
-  const relatedCount = db.countRelatedCleanup(target.id);
-  db.cleanupSettlementRelatedData(target.id);
+  const relatedCount = db.cleanupSettlementRelatedData(target.id, req.user.id, '撤销周结转');
 
   db.addLog('revoke_weekly_settlement', req.user.id, req.user.name, {
     week_key: wk,
@@ -574,8 +574,7 @@ app.delete('/api/settlements/:week_key/remove-import', requireRole('admin', 'lab
     'UPDATE weekly_settlements SET revoked = 1, revoked_at = ?, revoked_by = ? WHERE id = ?',
     [now, req.user.id, target.id]
   );
-  const relatedCount = db.countRelatedCleanup(target.id);
-  db.cleanupSettlementRelatedData(target.id);
+  const relatedCount = db.cleanupSettlementRelatedData(target.id, req.user.id, '移除导入结转');
   db.addLog('remove_imported_settlement', req.user.id, req.user.name, {
     week_key: wk,
     settlement_id: target.id,
@@ -878,6 +877,110 @@ app.get('/api/settlements/exports', requireRole('admin', 'lab_manager'), (req, r
   res.json(list);
 });
 
+app.get('/api/settlements/ledger', requireRole('admin', 'lab_manager'), (req, res) => {
+  const filters = {
+    week_key_start: req.query.week_key_start,
+    week_key_end: req.query.week_key_end,
+    export_type: req.query.export_type,
+    export_format: req.query.export_format,
+    created_by: req.query.created_by ? parseInt(req.query.created_by) : undefined,
+    invalid: req.query.invalid !== undefined ? req.query.invalid === 'true' : undefined
+  };
+  const list = db.getLedgerExports(filters);
+  const summary = db.getLedgerSummary(filters);
+  res.json({ list, summary });
+});
+
+app.get('/api/settlements/ledger/summary', requireRole('admin', 'lab_manager'), (req, res) => {
+  const filters = {
+    week_key_start: req.query.week_key_start,
+    week_key_end: req.query.week_key_end,
+    export_type: req.query.export_type,
+    export_format: req.query.export_format,
+    created_by: req.query.created_by ? parseInt(req.query.created_by) : undefined,
+    invalid: req.query.invalid !== undefined ? req.query.invalid === 'true' : undefined
+  };
+  const summary = db.getLedgerSummary(filters);
+  res.json(summary);
+});
+
+app.get('/api/settlements/ledger/:id', requireRole('admin', 'lab_manager'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const detail = db.getLedgerExportById(id);
+  if (!detail) return res.status(404).json({ error: '台账记录不存在' });
+  res.json(detail);
+});
+
+app.get('/api/settlements/ledger/export/csv', requireRole('admin', 'lab_manager'), (req, res) => {
+  const filters = {
+    week_key_start: req.query.week_key_start,
+    week_key_end: req.query.week_key_end,
+    export_type: req.query.export_type,
+    export_format: req.query.export_format,
+    created_by: req.query.created_by ? parseInt(req.query.created_by) : undefined,
+    invalid: req.query.invalid !== undefined ? req.query.invalid === 'true' : undefined
+  };
+  const list = db.getLedgerExports(filters);
+
+  const rows = [];
+  rows.push([
+    '导出ID', '来源周次', '导出类型', '文件格式', '文件名', '行数',
+    '关联说明条数', '状态', '操作人', '导出时间',
+    '失效原因', '失效人', '失效时间',
+    '清理说明数', '清理对比数', '清理单周导出数', '清理对比导出数', '清理总导出数'
+  ]);
+
+  list.forEach(item => {
+    const sourceWeek = item.week_key_b ? `${item.week_key_a} vs ${item.week_key_b}` : item.week_key_a;
+    const typeLabel = item.type === 'single' ? '单周JSON' : '对比CSV';
+    const status = item.invalid ? '已失效' : '有效';
+    const stats = item.last_cleaned_stats || {};
+
+    rows.push([
+      item.id,
+      sourceWeek,
+      typeLabel,
+      item.export_format,
+      item.filename,
+      item.row_count,
+      item.related_note_count || 0,
+      status,
+      item.created_by_user_name || item.created_by_name || '',
+      item.created_at,
+      item.invalidated_reason || '',
+      item.invalidated_by_user_name || '',
+      item.invalidated_at || '',
+      stats.cleaned_notes || 0,
+      stats.cleaned_comparisons || 0,
+      stats.cleaned_exports_single || 0,
+      stats.cleaned_exports_comparison || 0,
+      stats.cleaned_exports_total || 0
+    ]);
+  });
+
+  const csvContent = rows.map(r => r.map(cell => {
+    const s = String(cell == null ? '' : cell);
+    return s.includes(',') || s.includes('"') || s.includes('\n')
+      ? `"${s.replace(/"/g, '""')}"` : s;
+  }).join(',')).join('\n');
+
+  const now = new Date();
+  const timestamp = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const filename = `settlement-ledger-${timestamp}.csv`;
+  const bom = '\uFEFF';
+
+  db.addLog('export_settlement_ledger_csv', req.user.id, req.user.name, {
+    filename,
+    row_count: rows.length - 1,
+    filters
+  });
+  db.forceSave();
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(bom + csvContent);
+});
+
 app.get('/api/settlements/latest-info', requireAuth, (req, res) => {
   const latest = db.getLatestSettlement();
   if (latest) {
@@ -910,8 +1013,27 @@ app.get('/api/export/:week_key', requireAuth, (req, res) => {
   );
   if (!settlement) return res.status(404).json({ error: `${wk} 未找到有效的${validSource === 'imported' ? '导入' : ''}结转记录` });
 
-  settlement.totals = JSON.parse(settlement.totals);
-  res.setHeader('Content-Disposition', `attachment; filename="settlement-${wk}-${validSource}.json"`);
+  const totals = JSON.parse(settlement.totals);
+  const rowCount = totals.equipment_snapshot ? totals.equipment_snapshot.length : 0;
+  const now = new Date().toISOString();
+  const filename = `settlement-${wk}-${validSource}.json`;
+
+  db.insertRun(
+    `INSERT INTO settlement_exports (type, settlement_id, week_key_a, export_format, filename, row_count, created_by, created_by_name, created_at)
+     VALUES ('single', ?, ?, 'json', ?, ?, ?, ?, ?)`,
+    [settlement.id, wk, filename, rowCount, req.user.id, req.user.name, now]
+  );
+  db.addLog('export_settlement_single_json', req.user.id, req.user.name, {
+    settlement_id: settlement.id,
+    week_key: wk,
+    source: validSource,
+    filename,
+    row_count: rowCount
+  });
+  db.forceSave();
+
+  settlement.totals = totals;
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.setHeader('Content-Type', 'application/json');
   res.json(settlement);
 });
