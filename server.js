@@ -471,12 +471,25 @@ app.delete('/api/settlements/:week_key/revoke', requireRole('admin', 'lab_manage
   });
   db.forceSave();
 
+  const cleanedOut = {
+    cleaned_notes: relatedCount.cleaned_notes,
+    cleaned_comparisons: relatedCount.cleaned_comparisons,
+    cleaned_exports_single: relatedCount.cleaned_exports_single,
+    cleaned_exports_comparison: relatedCount.cleaned_exports_comparison,
+    cleaned_exports_total: relatedCount.cleaned_exports_total,
+    notes: relatedCount.cleaned_notes,
+    comparisons: relatedCount.cleaned_comparisons,
+    exports_single: relatedCount.cleaned_exports_single,
+    exports_comparison: relatedCount.cleaned_exports_comparison,
+    exports_total: relatedCount.cleaned_exports_total
+  };
+
   res.json({
     ok: true,
     week_key: wk,
     revoked_at: now,
     message: `${wk} 周结转已撤销，可重新执行结转`,
-    cleaned: relatedCount
+    cleaned: cleanedOut
   });
 });
 
@@ -585,7 +598,21 @@ app.delete('/api/settlements/:week_key/remove-import', requireRole('admin', 'lab
     cleaned_exports_total: relatedCount.cleaned_exports_total
   });
   db.forceSave();
-  res.json({ ok: true, week_key: wk, revoked_at: now, cleaned: relatedCount });
+
+  const cleanedOut = {
+    cleaned_notes: relatedCount.cleaned_notes,
+    cleaned_comparisons: relatedCount.cleaned_comparisons,
+    cleaned_exports_single: relatedCount.cleaned_exports_single,
+    cleaned_exports_comparison: relatedCount.cleaned_exports_comparison,
+    cleaned_exports_total: relatedCount.cleaned_exports_total,
+    notes: relatedCount.cleaned_notes,
+    comparisons: relatedCount.cleaned_comparisons,
+    exports_single: relatedCount.cleaned_exports_single,
+    exports_comparison: relatedCount.cleaned_exports_comparison,
+    exports_total: relatedCount.cleaned_exports_total
+  };
+
+  res.json({ ok: true, week_key: wk, revoked_at: now, cleaned: cleanedOut });
 });
 
 app.get('/api/settlements', requireAuth, (req, res) => {
@@ -919,6 +946,7 @@ app.get('/api/settlements/ledger/export/csv', requireRole('admin', 'lab_manager'
     week_key_end: req.query.week_key_end,
     export_type: req.query.export_type,
     export_format: req.query.export_format,
+    operator: req.query.operator,
     created_by: req.query.created_by ? parseInt(req.query.created_by) : undefined,
     invalid: req.query.invalid !== undefined ? req.query.invalid === 'true' : undefined
   };
