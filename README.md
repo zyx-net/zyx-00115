@@ -140,7 +140,7 @@ npm start
 
 ### 步骤 11: 撤销/移除后的数据收口
 
-**目的**: 验证结转失效后，对比入口、说明、导出记录一并清理，不留失效数据
+**目的**: 验证结转失效后，对比入口、说明、导出记录（含通过 comparison 间接关联的 CSV 导出）一并清理，不留失效数据
 
 1. 准备一条带说明、已被对比、已导出 CSV 的结转（如 `2026-W25`）
 2. 以实验员身份对此结转执行「↩️ 撤销此结转」或「🗑️ 移除导入」
@@ -148,11 +148,15 @@ npm start
    - 该结转**立即从列表消失**，勾选状态自动解除
    - 顶部操作栏「🔍 差异对比」「📊 导出对比 CSV」按钮自动禁用
    - 再次对相同两条结转执行对比 → 404「结转记录不存在或已撤销」
-   - 查看操作日志 `revoke_weekly_settlement`，其 `details` 中含：
+   - 查看操作日志 `revoke_weekly_settlement` 或 `remove_imported_settlement`，其 `details` 中含：
      - `cleaned_notes`：清理的说明条数
-     - `cleaned_comparisons`：涉及该结转的对比记录条数
-     - `cleaned_exports`：直接关联的导出记录条数
-   - 数据库中 `settlement_notes` / `settlement_comparisons` / `settlement_exports` 的关联记录全部级联清理
+     - `cleaned_comparisons`：涉及该结转（两端任何一端）的对比记录条数
+     - `cleaned_exports_single`：通过 `settlement_id` 直接关联（单周导出 JSON）被清理的条数
+     - `cleaned_exports_comparison`：通过 `comparison_id` 间接关联（差异对比 CSV 导出）被清理的条数
+     - `cleaned_exports_total`：以上两项合计清理的导出总条数（**不再用旧的 `cleaned_exports` 字段**）
+   - 调用 `GET /api/settlements/exports` → 已失效周次的任何导出记录**从列表中消失**（接口会 JOIN 结转表查 `revoked=0`，两端都有效才可见）
+   - 教师访问此接口 → 固定 403 权限拦截，接口仅对管理员/实验员开放
+   - 数据库中 `settlement_notes` / `settlement_comparisons` / `settlement_exports` 的关联记录全部级联清理，**无 orphan 行**
 
 ### 步骤 12: 重启后状态保持
 
@@ -170,11 +174,12 @@ npm start
    - 撤销过的结转**不会**重新出现（软删除标记 `revoked=1` 持久化在数据库）
    - **结转说明在重启后仍然存在**，创建人、创建时间、内容完整保留
    - **说明的编辑历史**（创建/修改时间）仍正确显示
-   - 「↩️ 撤销最近结转」按钮行为与重启前一致（只能撤销最新正式结转）
-   - 尝试撤销重启前已撤销的周次 → 正确提示「没有可撤销的有效结转记录」
+   - **结转导出历史列表（GET /api/settlements/exports）**重启后条数、每条的 filename/row_count/week_key_a/week_key_b 与重启前完全一致
+   - **教师访问 /api/settlements/exports 在重启后仍被 403 拦截**
    - 勾选 2 条结转后点击「🔍 差异对比」，结果与重启前完全一致
    - 重新导出 CSV → 行数、列、内容与重启前一致
-   - 查看「操作日志」：撤销、导入、**添加/修改/删除说明、对比、导出**的日志全部保留
+   - **再次做一次结转→对比→导出→撤销的完整链路**：撤销日志中的 `cleaned_exports_total`、`cleaned_exports_comparison` 字段重启后仍正确计算（不会出现旧实现那样记成 0 的情况）
+   - 查看「操作日志」：撤销、导入、**添加/修改/删除说明、对比、导出**的日志全部保留，所有 `revoke_weekly_settlement` / `remove_imported_settlement` 的 details 中包含 5 项 `cleaned_*` 统计字段
 
 ---
 
@@ -269,9 +274,10 @@ npm start
 | 导出结转数据（单周 JSON） | ✅ | ✅ | ✅ |
 | **结转差异对比（查看）** | ✅ | ✅ | ✅ |
 | **结转差异对比 → 导出 CSV** | ❌ | ✅ | ✅ |
+| **结转导出历史列表（/api/settlements/exports）** | ❌ | ✅ | ✅ |
 | **添加结转说明** | ❌ | ✅ | ✅ |
 | **修改/删除结转说明** | ❌ | ✅（自己创建的或任意） | ✅ |
-| **撤销后自动收口：对比入口 / CSV导出记录 / 说明关联** | ✅（自动生效） | ✅（自动生效+日志） | ✅（自动生效+日志） |
+| **撤销后自动收口：对比入口 / CSV导出记录（含 comparison 关联） / 说明关联 / exports 列表失效项过滤** | ✅（自动生效+404拦截） | ✅（自动生效+日志 cleaned_* 5 项字段） | ✅（自动生效+日志 cleaned_* 5 项字段） |
 | **查看结转说明** | ✅ | ✅ | ✅ |
 
 ## 技术架构

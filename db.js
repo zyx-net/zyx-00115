@@ -382,17 +382,48 @@ function hasActiveSettlementByWeekAndSource(weekKey, source) {
   return row && row.cnt > 0;
 }
 
+function countRelatedCleanup(settlementId) {
+  const noteCount = get(
+    "SELECT COUNT(*) AS c FROM settlement_notes WHERE settlement_id = ?",
+    [settlementId]
+  ).c;
+  const comparisonCount = get(
+    "SELECT COUNT(*) AS c FROM settlement_comparisons WHERE settlement_a_id = ? OR settlement_b_id = ?",
+    [settlementId, settlementId]
+  ).c;
+  const exportSingleCount = get(
+    "SELECT COUNT(*) AS c FROM settlement_exports WHERE settlement_id = ?",
+    [settlementId]
+  ).c;
+  const exportComparisonCount = get(
+    `SELECT COUNT(*) AS c FROM settlement_exports
+     WHERE comparison_id IN (
+       SELECT id FROM settlement_comparisons WHERE settlement_a_id = ? OR settlement_b_id = ?
+     )`,
+    [settlementId, settlementId]
+  ).c;
+  return {
+    notes: noteCount,
+    comparisons: comparisonCount,
+    exports_single: exportSingleCount,
+    exports_comparison: exportComparisonCount,
+    exports_total: exportSingleCount + exportComparisonCount
+  };
+}
+
 function cleanupSettlementRelatedData(settlementId) {
-  run('DELETE FROM settlement_notes WHERE settlement_id = ?', [settlementId]);
-  run('DELETE FROM settlement_comparisons WHERE settlement_a_id = ? OR settlement_b_id = ?', [settlementId, settlementId]);
+  run(
+    `DELETE FROM settlement_exports
+     WHERE comparison_id IN (
+       SELECT id FROM settlement_comparisons WHERE settlement_a_id = ? OR settlement_b_id = ?
+     )`,
+    [settlementId, settlementId]
+  );
   run('DELETE FROM settlement_exports WHERE settlement_id = ?', [settlementId]);
-  run(`
-    DELETE FROM settlement_exports
-    WHERE comparison_id IN (
-      SELECT id FROM settlement_comparisons WHERE settlement_a_id = ? OR settlement_b_id = ?
-    )
-  `, [settlementId, settlementId]);
+  run('DELETE FROM settlement_comparisons WHERE settlement_a_id = ? OR settlement_b_id = ?', [settlementId, settlementId]);
+  run('DELETE FROM settlement_notes WHERE settlement_id = ?', [settlementId]);
   saveToFile();
+  return countRelatedCleanup(settlementId);
 }
 
 function getNotesBySettlementId(settlementId) {
@@ -513,6 +544,7 @@ module.exports = {
   getLatestSettlement,
   getActiveSettlementByWeek,
   hasActiveSettlementByWeekAndSource,
+  countRelatedCleanup,
   cleanupSettlementRelatedData,
   getNotesBySettlementId,
   computeSettlementDiff

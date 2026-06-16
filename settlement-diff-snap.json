@@ -47,7 +47,7 @@
         {
           "id": 1,
           "content": "2026-W24 对账说明：显微镜1件损耗，确认原因是学生操作不当，已教育；后续走采购流程补充。",
-          "updated_at": "2026-06-16T18:53:27.479Z",
+          "updated_at": "2026-06-16T19:20:38.999Z",
           "created_by_name": "王五(实验员)"
         }
       ],
@@ -59,7 +59,7 @@
     "has_latest": true,
     "week_key": "2026-W24",
     "id": 1,
-    "settled_at": "2026-06-16T18:53:27.448Z"
+    "settled_at": "2026-06-16T19:20:38.970Z"
   },
   "logActions": [
     "revoke_weekly_settlement",
@@ -71,12 +71,14 @@
     "weekly_settlement",
     "approve_reservation",
     "create_reservation",
-    "approve_loss_report",
     "resolution_update_status_to_returned",
+    "approve_loss_report",
     "submit_loss_report",
     "return_equipment",
     "collect_equipment",
     "login",
     "system_init"
-  ]
+  ],
+  "exportsSnapshot": [],
+  "exportsCount": 0
 }

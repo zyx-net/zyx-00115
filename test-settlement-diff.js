@@ -208,6 +208,18 @@ async function main() {
   const rowCount = csvContent.split('\n').filter(l => l.trim().length > 0).length;
   assert(rowCount >= 2, `CSV 至少有表头+数据 (实际 ${rowCount} 行)`);
 
+  console.log('\n--- Step 5.5: /api/settlements/exports 权限拦截 + 导出列表可见性 ---');
+  const teacherExports = await request('GET', '/api/settlements/exports', null, teacherCookie);
+  assert(teacherExports.status === 403, `教师访问 /api/settlements/exports 被拦截 (403, 实际: ${teacherExports.status})`);
+
+  const labExportsBefore = await request('GET', '/api/settlements/exports', null, labCookie);
+  assert(labExportsBefore.status === 200, '实验员能正常访问 exports 列表');
+  assert(Array.isArray(labExportsBefore.body), 'exports 返回数组');
+  const hasW25ExportBefore = labExportsBefore.body.some(e =>
+    (e.week_key_a === '2026-W25') || (e.week_key_b === '2026-W25') || (e.type === 'comparison' && (e.week_key_a === '2026-W24' && e.week_key_b === '2026-W25'))
+  );
+  assert(hasW25ExportBefore, `撤销前列表中含涉及 W25 的导出记录（实际 ${labExportsBefore.body.length} 条）`);
+
   console.log(`\n--- Step 6: 操作日志核对（新增动作） ---`);
   const logs = await request('GET', '/api/logs', null, adminCookie);
   const actions = logs.body.map(l => l.action);
@@ -225,7 +237,7 @@ async function main() {
   assert(compareLog && compareLog.details && compareLog.details.week_key_a === '2026-W24',
     '对比日志含 week_key_a');
 
-  console.log('\n--- Step 7: 撤销后数据收口（关联说明、对比、导出记录清理） ---');
+  console.log('\n--- Step 7: 撤销后数据收口（关联说明、对比、导出记录清理 + exports 列表过滤） ---');
   const notesBefore = await request('GET', `/api/settlements/${sid2}/notes`, null, labCookie);
   const addS2Note = await request('POST', `/api/settlements/${sid2}/notes`, {
     content: 'W25 临时说明，撤销后应被清理'
@@ -242,10 +254,16 @@ async function main() {
   }, labCookie, false);
   assert(s2csv.status === 200, '再做一次涉及 W25 的 CSV 导出');
 
+  const exportsCountBeforeRevoke = (await request('GET', '/api/settlements/exports', null, labCookie)).body.length;
+  console.log(`  [info] 撤销前 exports 列表共 ${exportsCountBeforeRevoke} 条`);
+
   const revokeS2 = await request('DELETE', `/api/settlements/2026-W25/revoke`, null, labCookie);
   assert(revokeS2.status === 200, '撤销 W25 成功');
   assert(typeof revokeS2.body.cleaned !== 'undefined', '撤销返回 cleaned 统计');
   assert(revokeS2.body.cleaned.notes >= 1, `撤销时统计 notes 清理数量 (${revokeS2.body.cleaned.notes})`);
+  assert(revokeS2.body.cleaned.exports_total >= 1,
+    `撤销时统计 exports 清理（含 comparison 关联）非0: single=${revokeS2.body.cleaned.exports_single}, comparison=${revokeS2.body.cleaned.exports_comparison}, total=${revokeS2.body.cleaned.exports_total}`);
+  console.log(`  [info] cleaned: notes=${revokeS2.body.cleaned.notes}, comparisons=${revokeS2.body.cleaned.comparisons}, exports_total=${revokeS2.body.cleaned.exports_total}`);
 
   const s2notesAfter = await request('GET', `/api/settlements/${sid2}/notes`, null, labCookie);
   assert(s2notesAfter.status === 404, '撤销后说明查询返回 404（结转已失效）');
@@ -260,12 +278,29 @@ async function main() {
   }, labCookie, false);
   assert(csvAfterRevoke.status === 404, `撤销后涉及 W25 的 CSV 导出返回 404 (实际: ${csvAfterRevoke.status})`);
 
+  const exportsAfterRevoke = await request('GET', '/api/settlements/exports', null, labCookie);
+  assert(exportsAfterRevoke.status === 200, '撤销后 exports 查询正常');
+  const hasW25ExportAfter = exportsAfterRevoke.body.some(e =>
+    (e.week_key_a === '2026-W25') || (e.week_key_b === '2026-W25')
+  );
+  assert(hasW25ExportAfter === false, `撤销后 exports 列表中不再含涉及 W25 的记录（撤销前${exportsCountBeforeRevoke}条，撤销后${exportsAfterRevoke.body.length}条）`);
+
   const logsAfter = await request('GET', '/api/logs', null, adminCookie);
   const revokeLog = logsAfter.body.find(l => l.action === 'revoke_weekly_settlement');
   assert(revokeLog && revokeLog.details && typeof revokeLog.details.cleaned_notes === 'number',
     '撤销日志中包含 cleaned_notes 统计');
+  assert(revokeLog && revokeLog.details && typeof revokeLog.details.cleaned_exports_total === 'number' && revokeLog.details.cleaned_exports_total >= 1,
+    `撤销日志 cleaned_exports_total 非0（实际: ${revokeLog.details && revokeLog.details.cleaned_exports_total}）`);
 
   console.log('\n--- Step 8: 快照数据，用于跨重启验证 ---');
+  const exportsSnapshot = (await request('GET', '/api/settlements/exports', null, adminCookie)).body.map(e => ({
+    id: e.id,
+    type: e.type,
+    week_key_a: e.week_key_a,
+    week_key_b: e.week_key_b,
+    filename: e.filename,
+    row_count: e.row_count
+  }));
   const snap = {
     equipment: (await request('GET', '/api/equipment', null, adminCookie)).body.map(e => ({
       id: e.id, name: e.name, total: e.total_qty, avail: e.available_qty, locked: e.locked_qty
@@ -281,10 +316,12 @@ async function main() {
       reservation_total: s.totals.reservation_summary.total
     })),
     latestInfo: (await request('GET', '/api/settlements/latest-info', null, adminCookie)).body,
-    logActions: [...new Set(logsAfter.body.map(l => l.action))]
+    logActions: [...new Set(logsAfter.body.map(l => l.action))],
+    exportsSnapshot: exportsSnapshot,
+    exportsCount: exportsSnapshot.length
   };
   fs.writeFileSync('./settlement-diff-snap.json', JSON.stringify(snap, null, 2), 'utf8');
-  console.log(`  已写入快照: ${snap.equipment.length} 器材 / ${snap.settlements.length} 结转 / ${snap.settlements[0] ? snap.settlements[0].notes_count : 0} 说明`);
+  console.log(`  已写入快照: ${snap.equipment.length} 器材 / ${snap.settlements.length} 结转 / ${snap.settlements[0] ? snap.settlements[0].notes_count : 0} 说明 / ${snap.exportsCount} exports 记录`);
 
   console.log(`\n=== 回归测试结果: ${passed} 通过, ${failed} 失败 ===`);
   if (failed > 0) process.exitCode = 1;

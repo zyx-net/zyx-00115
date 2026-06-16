@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const db = require('./db');
 
 const app = express();
-const PORT = 3001;
+const PORT = parseInt(process.env.PORT, 10) || 3001;
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -452,11 +452,7 @@ app.delete('/api/settlements/:week_key/revoke', requireRole('admin', 'lab_manage
   );
 
   const totals = JSON.parse(target.totals);
-  const relatedCount = {
-    notes: db.all('SELECT COUNT(*) AS c FROM settlement_notes WHERE settlement_id = ?', [target.id])[0].c,
-    comparisons: db.all('SELECT COUNT(*) AS c FROM settlement_comparisons WHERE settlement_a_id = ? OR settlement_b_id = ?', [target.id, target.id])[0].c,
-    exports: db.all('SELECT COUNT(*) AS c FROM settlement_exports WHERE settlement_id = ?', [target.id])[0].c
-  };
+  const relatedCount = db.countRelatedCleanup(target.id);
   db.cleanupSettlementRelatedData(target.id);
 
   db.addLog('revoke_weekly_settlement', req.user.id, req.user.name, {
@@ -469,7 +465,9 @@ app.delete('/api/settlements/:week_key/revoke', requireRole('admin', 'lab_manage
     pending_returns: totals.pending_returns ? totals.pending_returns.length : 0,
     cleaned_notes: relatedCount.notes,
     cleaned_comparisons: relatedCount.comparisons,
-    cleaned_exports: relatedCount.exports
+    cleaned_exports_single: relatedCount.exports_single,
+    cleaned_exports_comparison: relatedCount.exports_comparison,
+    cleaned_exports_total: relatedCount.exports_total
   });
   db.forceSave();
 
@@ -576,18 +574,16 @@ app.delete('/api/settlements/:week_key/remove-import', requireRole('admin', 'lab
     'UPDATE weekly_settlements SET revoked = 1, revoked_at = ?, revoked_by = ? WHERE id = ?',
     [now, req.user.id, target.id]
   );
-  const relatedCount = {
-    notes: db.all('SELECT COUNT(*) AS c FROM settlement_notes WHERE settlement_id = ?', [target.id])[0].c,
-    comparisons: db.all('SELECT COUNT(*) AS c FROM settlement_comparisons WHERE settlement_a_id = ? OR settlement_b_id = ?', [target.id, target.id])[0].c,
-    exports: db.all('SELECT COUNT(*) AS c FROM settlement_exports WHERE settlement_id = ?', [target.id])[0].c
-  };
+  const relatedCount = db.countRelatedCleanup(target.id);
   db.cleanupSettlementRelatedData(target.id);
   db.addLog('remove_imported_settlement', req.user.id, req.user.name, {
     week_key: wk,
     settlement_id: target.id,
     cleaned_notes: relatedCount.notes,
     cleaned_comparisons: relatedCount.comparisons,
-    cleaned_exports: relatedCount.exports
+    cleaned_exports_single: relatedCount.exports_single,
+    cleaned_exports_comparison: relatedCount.exports_comparison,
+    cleaned_exports_total: relatedCount.exports_total
   });
   db.forceSave();
   res.json({ ok: true, week_key: wk, revoked_at: now, cleaned: relatedCount });
@@ -861,10 +857,24 @@ app.post('/api/settlements/compare/export-csv', requireRole('admin', 'lab_manage
   res.send(bom + csvContent);
 });
 
-app.get('/api/settlements/exports', requireAuth, (req, res) => {
-  const list = db.all(
-    'SELECT * FROM settlement_exports ORDER BY created_at DESC LIMIT 100'
-  );
+app.get('/api/settlements/exports', requireRole('admin', 'lab_manager'), (req, res) => {
+  const list = db.all(`
+    SELECT se.* FROM settlement_exports se
+    WHERE (
+      se.settlement_id IS NOT NULL
+      AND EXISTS (SELECT 1 FROM weekly_settlements ws WHERE ws.id = se.settlement_id AND ws.revoked = 0)
+    )
+    OR (
+      se.comparison_id IS NOT NULL
+      AND EXISTS (
+        SELECT 1 FROM settlement_comparisons sc
+        JOIN weekly_settlements wa ON wa.id = sc.settlement_a_id
+        JOIN weekly_settlements wb ON wb.id = sc.settlement_b_id
+        WHERE sc.id = se.comparison_id AND wa.revoked = 0 AND wb.revoked = 0
+      )
+    )
+    ORDER BY se.created_at DESC LIMIT 100
+  `);
   res.json(list);
 });
 

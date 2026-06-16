@@ -114,6 +114,24 @@ async function main() {
     settlement_a_id: 1, settlement_b_id: 2
   }, teacherCookie, false);
   assert(teacherExport.status === 403, `重启后教师导出 CSV 仍被拦截`);
+  const teacherExportsList = await request('GET', '/api/settlements/exports', null, teacherCookie);
+  assert(teacherExportsList.status === 403, `重启后教师访问 /api/settlements/exports 仍被拦截 (403, 实际: ${teacherExportsList.status})`);
+
+  console.log('\n--- 4.5. exports 列表重启前后持久化一致 ---');
+  const exportsRestart = await request('GET', '/api/settlements/exports', null, labCookie);
+  assert(exportsRestart.status === 200, '重启后实验员访问 exports 正常');
+  assert(exportsRestart.body.length === snap.exportsCount,
+    `exports 条数一致 (重启后${exportsRestart.body.length} vs 快照${snap.exportsCount})`);
+  if (snap.exportsSnapshot && snap.exportsSnapshot.length > 0) {
+    snap.exportsSnapshot.forEach((exp, idx) => {
+      const actual = exportsRestart.body[idx];
+      assert(actual && actual.type === exp.type, `exports[${idx}] type=${exp.type} 一致`);
+      assert(actual && actual.week_key_a === exp.week_key_a, `exports[${idx}] week_key_a 一致`);
+      assert(actual && actual.week_key_b === exp.week_key_b, `exports[${idx}] week_key_b 一致`);
+      assert(actual && actual.filename === exp.filename, `exports[${idx}] filename 一致`);
+      assert(actual && actual.row_count === exp.row_count, `exports[${idx}] row_count 一致`);
+    });
+  }
 
   console.log('\n--- 5. 对比+CSV导出重启后一致 ---');
   if (set.body.length >= 2) {
@@ -133,7 +151,7 @@ async function main() {
     assert(csv.startsWith('\uFEFF'), 'CSV BOM 依旧');
     assert(csv.includes('类别,变化类型'), 'CSV 表头完整');
 
-    console.log('\n--- 6. 撤销收口重启后生效 ---');
+    console.log('\n--- 6. 撤销收口重启后生效（含 cleaned_exports_total + exports 过滤） ---');
     const targetLatest = await request('GET', '/api/settlements/latest-info', null, adminCookie);
     if (targetLatest.body.has_latest) {
       const lc = targetLatest.body.week_key;
@@ -142,12 +160,35 @@ async function main() {
         content: '重启后为最新周次添加临时说明'
       }, labCookie);
       assert(note.status === 201, '重启后给最新周次加说明成功');
+      const diffForRevoke = await request('POST', '/api/settlements/compare', {
+        settlement_a_id: set.body[0].id, settlement_b_id: addNoteBefore.id
+      }, labCookie);
+      assert(diffForRevoke.status === 200, '重启后为最新周次做对比成功（用于导出）');
+      const csvForRevoke = await request('POST', '/api/settlements/compare/export-csv', {
+        settlement_a_id: set.body[0].id, settlement_b_id: addNoteBefore.id
+      }, labCookie, false);
+      assert(csvForRevoke.status === 200, '重启后为最新周次导出对比 CSV');
+      const countBeforeRevoke = (await request('GET', '/api/settlements/exports', null, labCookie)).body.length;
       const rev = await request('DELETE', `/api/settlements/${lc}/revoke`, null, labCookie);
       assert(rev.status === 200, `重启后撤销最新 ${lc} 成功`);
       assert(typeof rev.body.cleaned, '撤销返回 cleaned 统计');
       assert(rev.body.cleaned.notes >= 1, `撤销时清理说明数正确`);
-      const revs = await request('POST', '/api/settlements', null, adminCookie);
+      assert(rev.body.cleaned.exports_total >= 1,
+        `撤销时 cleaned.exports_total（含 comparison 关联）非0: ${JSON.stringify(rev.body.cleaned)}`);
+      const countAfterRevoke = (await request('GET', '/api/settlements/exports', null, labCookie)).body.length;
+      assert(countAfterRevoke < countBeforeRevoke,
+        `撤销后 exports 条数减少（前${countBeforeRevoke} → 后${countAfterRevoke}）`);
+      const revs = await request('GET', '/api/settlements', null, adminCookie);
       assert(!revs.body.find(s => s.week_key === lc), `撤销后 ${lc} 在列表中消失`);
+
+      console.log('\n--- 6.5. 撤销日志核对（cleaned_exports_total 字段存在） ---');
+      const logsRev = await request('GET', '/api/logs', null, adminCookie);
+      const latestRevokeLog = logsRev.body.filter(l => l.action === 'revoke_weekly_settlement').sort((a, b) => b.id - a.id)[0];
+      assert(latestRevokeLog && latestRevokeLog.details, '找到最新的撤销日志');
+      assert(typeof latestRevokeLog.details.cleaned_exports_total === 'number' && latestRevokeLog.details.cleaned_exports_total >= 1,
+        `撤销日志中 cleaned_exports_total 非0: ${latestRevokeLog.details && latestRevokeLog.details.cleaned_exports_total}`);
+      assert(typeof latestRevokeLog.details.cleaned_exports_comparison === 'number',
+        `撤销日志中含 cleaned_exports_comparison: ${latestRevokeLog.details && latestRevokeLog.details.cleaned_exports_comparison}`);
     }
   }
 
@@ -161,6 +202,13 @@ async function main() {
   requiredPersist.forEach(a => {
     assert(actions.includes(a), `重启后日志保留 ${a}`);
   });
+
+  const allRevokeLogs = logs.body.filter(l => l.action === 'revoke_weekly_settlement');
+  let hasCleanedExportsTotal = false;
+  allRevokeLogs.forEach(l => {
+    if (l.details && typeof l.details.cleaned_exports_total === 'number') hasCleanedExportsTotal = true;
+  });
+  assert(hasCleanedExportsTotal, '重启后撤销日志中含 cleaned_exports_total 字段（非历史0值）');
 
   console.log(`\n=== 重启核对结果: ${passed} 通过, ${failed} 失败 ===`);
   if (failed > 0) process.exit(1);
