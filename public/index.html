@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>实验课器材预约与损耗结转系统</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="app">
+    <div id="login-page" class="page active">
+      <div class="login-card">
+        <h1>🔬 实验课器材预约与损耗结转系统</h1>
+        <p class="login-subtitle">Laboratory Equipment Reservation & Loss Settlement</p>
+        <form id="login-form">
+          <div class="form-group">
+            <label>用户名</label>
+            <select id="login-username">
+              <option value="admin">admin (系统管理员)</option>
+              <option value="zhangsan">zhangsan (张三·物理教师)</option>
+              <option value="lisi">lisi (李四·化学教师)</option>
+              <option value="wangwu">wangwu (王五·实验员)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>密码</label>
+            <input type="password" id="login-password" value="admin123" placeholder="输入密码">
+          </div>
+          <button type="submit" class="btn btn-primary btn-block">登 录</button>
+          <div id="login-error" class="error-msg"></div>
+        </form>
+        <div class="login-hint">
+          <p>预设账号密码：</p>
+          <p>admin/admin123 · zhangsan/123456 · lisi/123456 · wangwu/123456</p>
+        </div>
+      </div>
+    </div>
+
+    <div id="main-page" class="page">
+      <nav class="sidebar">
+        <div class="sidebar-header">
+          <h2>🔬 器材管理系统</h2>
+          <div id="user-info" class="user-info"></div>
+        </div>
+        <ul class="nav-list">
+          <li><a href="#" data-page="dashboard" class="nav-link active">📊 总览面板</a></li>
+          <li><a href="#" data-page="equipment" class="nav-link">📦 器材库存</a></li>
+          <li><a href="#" data-page="reservations" class="nav-link">📋 器材预约</a></li>
+          <li><a href="#" data-page="loss-reports" class="nav-link">💥 损耗申报</a></li>
+          <li><a href="#" data-page="settlements" class="nav-link">📅 周结转</a></li>
+          <li><a href="#" data-page="logs" class="nav-link">📜 操作日志</a></li>
+        </ul>
+        <div class="sidebar-footer">
+          <button id="btn-logout" class="btn btn-danger btn-block">退出登录</button>
+          <button id="btn-reset" class="btn btn-warning btn-block" style="margin-top:8px">重置数据</button>
+        </div>
+      </nav>
+
+      <main class="content">
+        <div id="page-dashboard" class="content-page active">
+          <h2>总览面板</h2>
+          <div id="dashboard-stats" class="stats-grid"></div>
+          <div id="dashboard-equipment" class="card"></div>
+          <div id="dashboard-pending" class="card"></div>
+        </div>
+
+        <div id="page-equipment" class="content-page">
+          <h2>器材库存</h2>
+          <div id="equipment-table"></div>
+        </div>
+
+        <div id="page-reservations" class="content-page">
+          <h2>器材预约</h2>
+          <div id="reservation-actions" class="action-bar"></div>
+          <div id="reservation-table"></div>
+        </div>
+
+        <div id="page-loss-reports" class="content-page">
+          <h2>损耗申报</h2>
+          <div id="loss-actions" class="action-bar"></div>
+          <div id="loss-table"></div>
+        </div>
+
+        <div id="page-settlements" class="content-page">
+          <h2>周结转</h2>
+          <div id="settlement-actions" class="action-bar"></div>
+          <div id="settlement-list"></div>
+        </div>
+
+        <div id="page-logs" class="content-page">
+          <h2>操作日志</h2>
+          <div id="logs-table"></div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <div id="modal-overlay" class="modal-overlay" style="display:none">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="modal-title"></h3>
+        <button class="modal-close" onclick="closeModal()">&times;</button>
+      </div>
+      <div id="modal-body" class="modal-body"></div>
+    </div>
+  </div>
+
+  <div id="toast-container"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
