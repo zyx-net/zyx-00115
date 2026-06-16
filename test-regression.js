@@ -78,9 +78,18 @@ async function runTests() {
   assert(mic1.total_qty === 3, `显微镜总量仍为 3 (实际: ${mic1.total_qty})`);
   assert(mic1.locked_qty === 2, `显微镜锁定量为 2 (实际: ${mic1.locked_qty})`);
   assert(mic1.available_qty === 1, `显微镜可用量为 1 (实际: ${mic1.available_qty})`);
+  // 新增严格检查：所有器材 available_qty 不应为负；不变式 total = avail + locked
+  eq1.body.forEach(e => {
+    assert(e.available_qty >= 0, `${e.name} available_qty(${e.available_qty}) 不应为负`);
+    assert(e.available_qty + e.locked_qty === e.total_qty,
+      `${e.name} 不变式 failed: avail(${e.available_qty}) + locked(${e.locked_qty}) != total(${e.total_qty})`);
+    assert(e.total_qty - e.locked_qty === e.available_qty,
+      `${e.name} 可预约口径对齐 failed: total - locked != available_qty`);
+  });
   const checkVal = mic1.total_qty - mic1.locked_qty;
   assert(checkVal >= 0, `total - locked = ${checkVal} 不应为负`);
   assert(checkVal === 1, `total - locked = 1, 可再约 1 件 (实际: ${checkVal})`);
+  assert(mic1.available_qty >= 1, `后端返回 available_qty(${mic1.available_qty}) >= 预约量 1，显示不应为负`);
 
   const ls = await login('lisi', '123456', '');
   cookie = ls.cookie;
@@ -100,6 +109,28 @@ async function runTests() {
   assert(mic2.locked_qty === 3, `显微镜锁定量应为 3 (2+1, 实际: ${mic2.locked_qty})`);
   assert(mic2.available_qty === 0, `显微镜可用量应为 0 (实际: ${mic2.available_qty})`);
   assert(mic2.available_qty >= 0, `显微镜可用量不应为负 (实际: ${mic2.available_qty})`);
+  // 李四预约成功返回 200，此时 available_qty 必须 >= 所请求的数量 (qty=1 时当时有 1)
+  assert(r2.status === 200 && mic2.available_qty >= 0,
+    `后端返回 200 成功时，实际可预约量 >= 请求量，前端显示也必须 >= 0`);
+
+  console.log('\n=== Bug 3 回归: 前端显示口径与后端对齐 ===');
+  console.log('预期: 前端不应再用 available_qty - locked_qty 计算显示可用量');
+  const fs = require('fs');
+  const appJs = fs.readFileSync('./public/app.js', 'utf8');
+  const badPattern = /available_qty\s*-\s*locked_qty/;
+  const hasBadPattern = badPattern.test(appJs);
+  assert(!hasBadPattern, '前端 app.js 不应再包含 available_qty - locked_qty 公式');
+  const goodPattern = /可用:\$\{e\.available_qty\}/;
+  assert(goodPattern.test(appJs), '前端下拉框显示口径应直接使用 equipment.available_qty');
+  const tableGoodPattern = /const remaining = e\.available_qty/;
+  assert(tableGoodPattern.test(appJs), '前端表格高亮口径应直接使用 equipment.available_qty');
+  // 再拿一次全量 equipment 检查所有器材口径一致
+  const eqDisplayCheck = await request('GET', '/api/equipment', null, cookie);
+  eqDisplayCheck.body.forEach(e => {
+    assert(e.available_qty >= 0, `${e.name} available_qty(${e.available_qty}) 不会出现前端显示负数`);
+    assert(e.available_qty === e.total_qty - e.locked_qty,
+      `${e.name} 显示口径(${e.available_qty}) == 冲突检测口径(${e.total_qty - e.locked_qty})`);
+  });
 
   console.log('\n=== Bug 2 回归: 归还 1 件 + 审批损耗 1 件后状态对齐 ===');
   console.log('预期: 预约量 2, 归还 1 + 损耗 1 = 2 全量结清, 状态 returned, 无待归还');

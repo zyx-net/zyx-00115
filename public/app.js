@@ -94,7 +94,8 @@ async function loadEquipment() {
 function renderEqTable(list) {
   let h = '<table class="data-table"><thead><tr><th>ID</th><th>名称</th><th>总量</th><th>可用</th><th>锁定</th></tr></thead><tbody>';
   list.forEach(e => {
-    const warn = e.available_qty - e.locked_qty <= 0 ? ' class="text-danger"' : (e.available_qty - e.locked_qty <= 2 ? ' class="text-warning"' : '');
+    const remaining = e.available_qty;
+    const warn = remaining <= 0 ? ' class="text-danger"' : (remaining <= 2 ? ' class="text-warning"' : '');
     h += `<tr${warn}><td>${e.id}</td><td>${e.name}</td><td>${e.total_qty}</td><td>${e.available_qty}</td><td>${e.locked_qty}</td></tr>`;
   });
   h += '</tbody></table>';
@@ -150,7 +151,7 @@ async function showReserveModal() {
   myClasses.forEach(cl => { h += `<option value="${cl.id}">${cl.name}</option>`; });
   h += '</select></div>';
   h += '<div class="form-group"><label>器材</label><select name="equipment_id" required>';
-  equipmentCache.forEach(e => { h += `<option value="${e.id}">${e.name} (可用:${e.available_qty - e.locked_qty})</option>`; });
+  equipmentCache.forEach(e => { h += `<option value="${e.id}">${e.name} (可用:${e.available_qty})</option>`; });
   h += '</select></div>';
   h += '<div class="form-group"><label>数量</label><input type="number" name="qty" min="1" required></div>';
   h += '<div class="form-group"><label>周次</label><input type="text" name="week_key" placeholder="如 2026-W24" required></div>';

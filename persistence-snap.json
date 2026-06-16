@@ -1,0 +1,62 @@
+{
+  "equipment": [
+    {
+      "id": 1,
+      "name": "示波器",
+      "total": 10,
+      "avail": 10,
+      "locked": 0
+    },
+    {
+      "id": 2,
+      "name": "万用表",
+      "total": 5,
+      "avail": 5,
+      "locked": 0
+    },
+    {
+      "id": 3,
+      "name": "烧杯",
+      "total": 50,
+      "avail": 50,
+      "locked": 0
+    },
+    {
+      "id": 4,
+      "name": "显微镜",
+      "total": 2,
+      "avail": 1,
+      "locked": 1
+    },
+    {
+      "id": 5,
+      "name": "试管",
+      "total": 100,
+      "avail": 100,
+      "locked": 0
+    }
+  ],
+  "reservations": [
+    {
+      "id": 2,
+      "status": "pending",
+      "returned_qty": 0
+    },
+    {
+      "id": 1,
+      "status": "returned",
+      "returned_qty": 1
+    }
+  ],
+  "losses": [
+    {
+      "id": 1,
+      "status": "approved"
+    }
+  ],
+  "settlements": [
+    {
+      "week": "2026-W25"
+    }
+  ]
+}
