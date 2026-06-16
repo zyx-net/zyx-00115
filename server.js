@@ -452,6 +452,13 @@ app.delete('/api/settlements/:week_key/revoke', requireRole('admin', 'lab_manage
   );
 
   const totals = JSON.parse(target.totals);
+  const relatedCount = {
+    notes: db.all('SELECT COUNT(*) AS c FROM settlement_notes WHERE settlement_id = ?', [target.id])[0].c,
+    comparisons: db.all('SELECT COUNT(*) AS c FROM settlement_comparisons WHERE settlement_a_id = ? OR settlement_b_id = ?', [target.id, target.id])[0].c,
+    exports: db.all('SELECT COUNT(*) AS c FROM settlement_exports WHERE settlement_id = ?', [target.id])[0].c
+  };
+  db.cleanupSettlementRelatedData(target.id);
+
   db.addLog('revoke_weekly_settlement', req.user.id, req.user.name, {
     week_key: wk,
     settlement_id: target.id,
@@ -459,7 +466,10 @@ app.delete('/api/settlements/:week_key/revoke', requireRole('admin', 'lab_manage
     equipment_count: totals.equipment_snapshot ? totals.equipment_snapshot.length : 0,
     reservation_total: totals.reservation_summary ? totals.reservation_summary.total : 0,
     loss_qty: totals.loss_summary ? totals.loss_summary.total_qty : 0,
-    pending_returns: totals.pending_returns ? totals.pending_returns.length : 0
+    pending_returns: totals.pending_returns ? totals.pending_returns.length : 0,
+    cleaned_notes: relatedCount.notes,
+    cleaned_comparisons: relatedCount.comparisons,
+    cleaned_exports: relatedCount.exports
   });
   db.forceSave();
 
@@ -467,7 +477,8 @@ app.delete('/api/settlements/:week_key/revoke', requireRole('admin', 'lab_manage
     ok: true,
     week_key: wk,
     revoked_at: now,
-    message: `${wk} 周结转已撤销，可重新执行结转`
+    message: `${wk} 周结转已撤销，可重新执行结转`,
+    cleaned: relatedCount
   });
 });
 
@@ -565,11 +576,21 @@ app.delete('/api/settlements/:week_key/remove-import', requireRole('admin', 'lab
     'UPDATE weekly_settlements SET revoked = 1, revoked_at = ?, revoked_by = ? WHERE id = ?',
     [now, req.user.id, target.id]
   );
+  const relatedCount = {
+    notes: db.all('SELECT COUNT(*) AS c FROM settlement_notes WHERE settlement_id = ?', [target.id])[0].c,
+    comparisons: db.all('SELECT COUNT(*) AS c FROM settlement_comparisons WHERE settlement_a_id = ? OR settlement_b_id = ?', [target.id, target.id])[0].c,
+    exports: db.all('SELECT COUNT(*) AS c FROM settlement_exports WHERE settlement_id = ?', [target.id])[0].c
+  };
+  db.cleanupSettlementRelatedData(target.id);
   db.addLog('remove_imported_settlement', req.user.id, req.user.name, {
-    week_key: wk, settlement_id: target.id
+    week_key: wk,
+    settlement_id: target.id,
+    cleaned_notes: relatedCount.notes,
+    cleaned_comparisons: relatedCount.comparisons,
+    cleaned_exports: relatedCount.exports
   });
   db.forceSave();
-  res.json({ ok: true, week_key: wk, revoked_at: now });
+  res.json({ ok: true, week_key: wk, revoked_at: now, cleaned: relatedCount });
 });
 
 app.get('/api/settlements', requireAuth, (req, res) => {
@@ -581,7 +602,269 @@ app.get('/api/settlements', requireAuth, (req, res) => {
   list.forEach(s => {
     s.totals = JSON.parse(s.totals);
     s.is_latest_settled = s.source === 'settled' && s.id === latestId;
+    s.notes = db.getNotesBySettlementId(s.id);
   });
+  res.json(list);
+});
+
+app.get('/api/settlements/:id/notes', requireAuth, (req, res) => {
+  const id = parseInt(req.params.id);
+  const s = db.get('SELECT * FROM weekly_settlements WHERE id = ? AND revoked = 0', [id]);
+  if (!s) return res.status(404).json({ error: '结转记录不存在或已撤销' });
+  const notes = db.getNotesBySettlementId(id);
+  res.json(notes);
+});
+
+app.post('/api/settlements/:id/notes', requireRole('admin', 'lab_manager'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const { content } = req.body;
+  if (!content || typeof content !== 'string' || content.trim().length === 0) {
+    return res.status(400).json({ error: '说明内容不能为空' });
+  }
+  const s = db.get('SELECT * FROM weekly_settlements WHERE id = ? AND revoked = 0', [id]);
+  if (!s) return res.status(404).json({ error: '结转记录不存在或已撤销，无法添加说明' });
+
+  const now = new Date().toISOString();
+  const noteId = db.insertRun(
+    'INSERT INTO settlement_notes (settlement_id, week_key, content, created_by, created_by_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [id, s.week_key, content.trim(), req.user.id, req.user.name, now, now]
+  );
+  db.addLog('add_settlement_note', req.user.id, req.user.name, {
+    settlement_id: id,
+    week_key: s.week_key,
+    note_id: noteId,
+    content_length: content.trim().length
+  });
+  db.forceSave();
+  const note = db.get('SELECT * FROM settlement_notes WHERE id = ?', [noteId]);
+  res.status(201).json(note);
+});
+
+app.put('/api/settlements/notes/:noteId', requireRole('admin', 'lab_manager'), (req, res) => {
+  const noteId = parseInt(req.params.noteId);
+  const { content } = req.body;
+  if (!content || typeof content !== 'string' || content.trim().length === 0) {
+    return res.status(400).json({ error: '说明内容不能为空' });
+  }
+  const note = db.get('SELECT * FROM settlement_notes WHERE id = ?', [noteId]);
+  if (!note) return res.status(404).json({ error: '说明记录不存在' });
+
+  const s = db.get('SELECT * FROM weekly_settlements WHERE id = ? AND revoked = 0', [note.settlement_id]);
+  if (!s) return res.status(404).json({ error: '关联结转记录已撤销，无法修改说明' });
+
+  const now = new Date().toISOString();
+  db.run(
+    'UPDATE settlement_notes SET content = ?, updated_at = ? WHERE id = ?',
+    [content.trim(), now, noteId]
+  );
+  db.addLog('update_settlement_note', req.user.id, req.user.name, {
+    note_id: noteId,
+    settlement_id: note.settlement_id,
+    week_key: note.week_key,
+    original_content_length: note.content.length,
+    new_content_length: content.trim().length
+  });
+  db.forceSave();
+  const updated = db.get('SELECT * FROM settlement_notes WHERE id = ?', [noteId]);
+  res.json(updated);
+});
+
+app.delete('/api/settlements/notes/:noteId', requireRole('admin', 'lab_manager'), (req, res) => {
+  const noteId = parseInt(req.params.noteId);
+  const note = db.get('SELECT * FROM settlement_notes WHERE id = ?', [noteId]);
+  if (!note) return res.status(404).json({ error: '说明记录不存在' });
+
+  db.run('DELETE FROM settlement_notes WHERE id = ?', [noteId]);
+  db.addLog('delete_settlement_note', req.user.id, req.user.name, {
+    note_id: noteId,
+    settlement_id: note.settlement_id,
+    week_key: note.week_key
+  });
+  db.forceSave();
+  res.json({ ok: true, note_id: noteId });
+});
+
+app.post('/api/settlements/compare', requireAuth, (req, res) => {
+  const { settlement_a_id, settlement_b_id } = req.body;
+  if (!settlement_a_id || !settlement_b_id) {
+    return res.status(400).json({ error: '需要指定两条结转记录的 ID' });
+  }
+  if (parseInt(settlement_a_id) === parseInt(settlement_b_id)) {
+    return res.status(400).json({ error: '不能对比同一条结转记录' });
+  }
+
+  const a = db.get('SELECT * FROM weekly_settlements WHERE id = ? AND revoked = 0', [parseInt(settlement_a_id)]);
+  const b = db.get('SELECT * FROM weekly_settlements WHERE id = ? AND revoked = 0', [parseInt(settlement_b_id)]);
+
+  if (!a || !b) {
+    const missing = [];
+    if (!a) missing.push(settlement_a_id);
+    if (!b) missing.push(settlement_b_id);
+    return res.status(404).json({ error: `结转记录不存在或已撤销: ${missing.join(', ')}` });
+  }
+
+  const diff = db.computeSettlementDiff(a, b);
+  let comparisonId = null;
+
+  if (['admin', 'lab_manager'].includes(req.user.role)) {
+    const summary = {
+      equipment_added: diff.equipment_snapshot.added.length,
+      equipment_removed: diff.equipment_snapshot.removed.length,
+      equipment_changed: diff.equipment_snapshot.changed.length,
+      reservation_total_diff: diff.reservation_summary.total_diff,
+      loss_qty_diff: diff.loss_summary.qty_diff,
+      pending_added: diff.pending_returns.added.length,
+      pending_removed: diff.pending_returns.removed.length,
+      pending_changed: diff.pending_returns.changed.length
+    };
+    const now = new Date().toISOString();
+    comparisonId = db.insertRun(
+      'INSERT INTO settlement_comparisons (settlement_a_id, settlement_b_id, week_key_a, week_key_b, diff_summary, created_by, created_by_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [a.id, b.id, a.week_key, b.week_key, JSON.stringify(summary), req.user.id, req.user.name, now]
+    );
+    db.addLog('compare_settlements', req.user.id, req.user.name, {
+      comparison_id: comparisonId,
+      settlement_a_id: a.id,
+      settlement_b_id: b.id,
+      week_key_a: a.week_key,
+      week_key_b: b.week_key
+    });
+    db.forceSave();
+  }
+
+  res.json({
+    comparison_id: comparisonId,
+    settlement_a: {
+      id: a.id, week_key: a.week_key, source: a.source, settled_at: a.settled_at
+    },
+    settlement_b: {
+      id: b.id, week_key: b.week_key, source: b.source, settled_at: b.settled_at
+    },
+    diff
+  });
+});
+
+function diffToCsvRows(comparisonResult) {
+  const rows = [];
+  const { settlement_a, settlement_b, diff } = comparisonResult;
+
+  rows.push(['类别', '变化类型', '项目', '字段', settlement_a.week_key, settlement_b.week_key, '差异']);
+
+  diff.equipment_snapshot.added.forEach(e => {
+    rows.push(['器材快照', '新增', e.name, '总量', '', e.total, `+${e.total}`]);
+    rows.push(['器材快照', '新增', e.name, '可用', '', e.available, `+${e.available}`]);
+    rows.push(['器材快照', '新增', e.name, '锁定', '', e.locked, `+${e.locked}`]);
+  });
+  diff.equipment_snapshot.removed.forEach(e => {
+    rows.push(['器材快照', '减少', e.name, '总量', e.total, '', `-${e.total}`]);
+    rows.push(['器材快照', '减少', e.name, '可用', e.available, '', `-${e.available}`]);
+    rows.push(['器材快照', '减少', e.name, '锁定', e.locked, '', `-${e.locked}`]);
+  });
+  diff.equipment_snapshot.changed.forEach(e => {
+    Object.entries(e.changes).forEach(([field, ch]) => {
+      const label = { total: '总量', available: '可用', locked: '锁定' }[field] || field;
+      rows.push(['器材快照', '变化', e.name, label, ch.from, ch.to, (ch.to - ch.from) > 0 ? `+${ch.to - ch.from}` : `${ch.to - ch.from}`]);
+    });
+  });
+
+  diff.reservation_summary.added.forEach(s => {
+    rows.push(['预约汇总', '新增', `状态:${s.status}`, '条数', '', s.count, `+${s.count}`]);
+  });
+  diff.reservation_summary.removed.forEach(s => {
+    rows.push(['预约汇总', '减少', `状态:${s.status}`, '条数', s.count, '', `-${s.count}`]);
+  });
+  diff.reservation_summary.changed.forEach(s => {
+    rows.push(['预约汇总', '变化', `状态:${s.status}`, '条数', s.from, s.to, s.diff > 0 ? `+${s.diff}` : `${s.diff}`]);
+  });
+
+  const ls = diff.loss_summary;
+  rows.push(['损耗汇总', '对比', '损耗申报数', '条数', ls.a_reports, ls.b_reports, ls.reports_diff > 0 ? `+${ls.reports_diff}` : `${ls.reports_diff}`]);
+  rows.push(['损耗汇总', '对比', '损耗件数', '件数', ls.a_qty, ls.b_qty, ls.qty_diff > 0 ? `+${ls.qty_diff}` : `${ls.qty_diff}`]);
+
+  diff.pending_returns.added.forEach(p => {
+    rows.push(['待归还', '新增', p.equipment_name, '数量', '', p.qty, `+${p.qty}`]);
+    rows.push(['待归还', '新增', p.equipment_name, '状态', '', p.status, '']);
+  });
+  diff.pending_returns.removed.forEach(p => {
+    rows.push(['待归还', '减少', p.equipment_name, '数量', p.qty, '', `-${p.qty}`]);
+    rows.push(['待归还', '减少', p.equipment_name, '状态', p.status, '', '']);
+  });
+  diff.pending_returns.changed.forEach(p => {
+    Object.entries(p.changes).forEach(([field, ch]) => {
+      if (field === 'qty') {
+        rows.push(['待归还', '变化', p.equipment_name, '数量', ch.from, ch.to, (ch.to - ch.from) > 0 ? `+${ch.to - ch.from}` : `${ch.to - ch.from}`]);
+      } else if (field === 'status') {
+        rows.push(['待归还', '状态变化', p.equipment_name, '状态', ch.from, ch.to, '状态变更']);
+      }
+    });
+  });
+
+  return rows;
+}
+
+app.post('/api/settlements/compare/export-csv', requireRole('admin', 'lab_manager'), (req, res) => {
+  const { settlement_a_id, settlement_b_id } = req.body;
+  if (!settlement_a_id || !settlement_b_id) {
+    return res.status(400).json({ error: '需要指定两条结转记录的 ID' });
+  }
+
+  const a = db.get('SELECT * FROM weekly_settlements WHERE id = ? AND revoked = 0', [parseInt(settlement_a_id)]);
+  const b = db.get('SELECT * FROM weekly_settlements WHERE id = ? AND revoked = 0', [parseInt(settlement_b_id)]);
+  if (!a || !b) return res.status(404).json({ error: '结转记录不存在或已撤销' });
+
+  const diff = db.computeSettlementDiff(a, b);
+  const comparisonResult = {
+    settlement_a: { week_key: a.week_key },
+    settlement_b: { week_key: b.week_key },
+    diff
+  };
+  const rows = diffToCsvRows(comparisonResult);
+  const summary = {
+    equipment_added: diff.equipment_snapshot.added.length,
+    equipment_removed: diff.equipment_snapshot.removed.length,
+    equipment_changed: diff.equipment_snapshot.changed.length,
+    reservation_total_diff: diff.reservation_summary.total_diff,
+    loss_qty_diff: diff.loss_summary.qty_diff,
+    pending_added: diff.pending_returns.added.length,
+    pending_removed: diff.pending_returns.removed.length,
+    pending_changed: diff.pending_returns.changed.length
+  };
+  const now = new Date().toISOString();
+  const comparisonId = db.insertRun(
+    'INSERT INTO settlement_comparisons (settlement_a_id, settlement_b_id, week_key_a, week_key_b, diff_summary, created_by, created_by_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    [a.id, b.id, a.week_key, b.week_key, JSON.stringify(summary), req.user.id, req.user.name, now]
+  );
+
+  const filename = `settlement-diff-${a.week_key}_vs_${b.week_key}.csv`;
+  db.insertRun(
+    'INSERT INTO settlement_exports (type, comparison_id, week_key_a, week_key_b, export_format, filename, row_count, created_by, created_by_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    ['comparison', comparisonId, a.week_key, b.week_key, 'csv', filename, rows.length, req.user.id, req.user.name, now]
+  );
+  db.addLog('export_settlement_diff_csv', req.user.id, req.user.name, {
+    comparison_id: comparisonId,
+    week_key_a: a.week_key,
+    week_key_b: b.week_key,
+    filename,
+    row_count: rows.length
+  });
+  db.forceSave();
+
+  const csvContent = rows.map(r => r.map(cell => {
+    const s = String(cell == null ? '' : cell);
+    return s.includes(',') || s.includes('"') || s.includes('\n')
+      ? `"${s.replace(/"/g, '""')}"` : s;
+  }).join(',')).join('\n');
+
+  const bom = '\uFEFF';
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(bom + csvContent);
+});
+
+app.get('/api/settlements/exports', requireAuth, (req, res) => {
+  const list = db.all(
+    'SELECT * FROM settlement_exports ORDER BY created_at DESC LIMIT 100'
+  );
   res.json(list);
 });
 

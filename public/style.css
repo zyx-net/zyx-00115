@@ -128,3 +128,21 @@ button:disabled {
   cursor: not-allowed;
   transform: none !important;
 }
+
+.btn-xs {
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 3px;
+}
+
+.settlement-card.selected-card {
+  border: 2px solid #3498db !important;
+  box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.2);
+}
+
+.form-hint {
+  font-size: 12px;
+  color: #6c757d;
+  margin-top: 4px;
+  line-height: 1.6;
+}

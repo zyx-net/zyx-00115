@@ -2,6 +2,7 @@ let currentUser = null;
 let coursesCache = [];
 let classesCache = [];
 let equipmentCache = [];
+let selectedSettlementIds = new Set();
 
 const STATUS_MAP = {
   pending: '待审批', approved: '已审批', collected: '已领用',
@@ -268,27 +269,84 @@ async function rejectLoss(id) {
 async function loadSettlements() {
   const settlements = await api('GET', '/api/settlements');
   const ab = document.getElementById('settlement-actions');
+
+  selectedSettlementIds.forEach(id => {
+    if (!settlements.some(s => s.id === id)) selectedSettlementIds.delete(id);
+  });
+
   if (['admin','lab_manager'].includes(currentUser.role)) {
+    const compareDisabled = selectedSettlementIds.size !== 2;
     ab.innerHTML = `
       <button class="btn btn-primary" onclick="showSettlementModal()">+ 执行周结转</button>
       <button class="btn btn-secondary" onclick="showImportModal()" style="margin-left:8px">📤 导入结转 JSON</button>
       <button class="btn btn-danger" onclick="showRevokeLatestModal()" style="margin-left:8px">↩️ 撤销最近结转</button>
+      <button class="btn btn-info" onclick="doCompare()" style="margin-left:8px" ${compareDisabled ? 'disabled' : ''}>
+        🔍 差异对比 (${selectedSettlementIds.size}/2)
+      </button>
+      <button class="btn btn-success" onclick="exportDiffCsv()" style="margin-left:8px" ${compareDisabled ? 'disabled' : ''}>
+        📊 导出对比 CSV
+      </button>
+      ${selectedSettlementIds.size > 0 ? `<button class="btn btn-sm" style="margin-left:8px;background:#eee;color:#555" onclick="clearSettlementSelection()">取消选择</button>` : ''}
+    `;
+  } else if (selectedSettlementIds.size === 2) {
+    ab.innerHTML = `
+      <button class="btn btn-info" onclick="doCompare()">🔍 差异对比 (已选 2 条)</button>
+      <button class="btn btn-sm" style="margin-left:8px;background:#eee;color:#555" onclick="clearSettlementSelection()">取消选择</button>
     `;
   } else {
-    ab.innerHTML = '';
+    ab.innerHTML = selectedSettlementIds.size > 0
+      ? `<button class="btn btn-sm" style="background:#eee;color:#555" onclick="clearSettlementSelection()">取消选择 (${selectedSettlementIds.size})</button>`
+      : '';
+  }
+
+  if (settlements.length > 0) {
+    const hint = document.createElement('div');
   }
 
   let h = '';
   if (settlements.length === 0) {
     h = '<div class="empty-state">暂无结转记录</div>';
   } else {
+    if (settlements.length >= 2) {
+      h += '<div style="background:#e8f4fd;padding:10px 14px;border-radius:6px;margin-bottom:16px;border:1px solid #b6d8ef;color:#1a5276">💡 提示：勾选结转记录卡片左上角的复选框（选 2 条），即可启用"差异对比"和"导出 CSV"功能。</div>';
+    }
     settlements.forEach(s => {
+      const isSelected = selectedSettlementIds.has(s.id);
+      const selectedStyle = isSelected ? ' border:2px solid #3498db;box-shadow:0 0 0 3px rgba(52,152,219,0.2);' : '';
       const sourceBadge = s.source === 'imported'
         ? ' <span class="source-badge source-imported">📁 导入视图</span>'
         : (s.is_latest_settled ? ' <span class="source-badge source-latest">⭐ 最新结转</span>' : '');
-      h += '<div class="settlement-card">';
-      h += `<div class="settlement-header"><h3>周次: ${s.week_key}${sourceBadge}</h3><span class="settlement-time">${new Date(s.settled_at).toLocaleString()}</span></div>`;
+      h += `<div class="settlement-card" style="position:relative;${selectedStyle}">`;
+      h += `<label style="position:absolute;top:10px;left:12px;z-index:2;cursor:pointer;display:flex;align-items:center;gap:4px">
+        <input type="checkbox" data-id="${s.id}" ${isSelected ? 'checked' : ''} onchange="toggleSettlementSelection(${s.id})">
+        <span style="font-size:13px;color:#555">选择对比</span>
+      </label>`;
+      h += `<div class="settlement-header" style="padding-left:140px"><h3>周次: ${s.week_key}${sourceBadge}</h3><span class="settlement-time">${new Date(s.settled_at).toLocaleString()}</span></div>`;
       h += '<div class="settlement-body">';
+
+      if (s.notes && s.notes.length > 0) {
+        h += '<h4>📝 结转说明留痕</h4>';
+        h += '<div style="background:#fef9e7;border:1px solid #f7dc6f;border-radius:6px;padding:10px 12px;margin-bottom:12px">';
+        s.notes.forEach(note => {
+          h += `<div style="padding:6px 0;border-bottom:1px dashed #f0c911;${s.notes.indexOf(note) === s.notes.length - 1 ? 'border-bottom:none' : ''}">
+            <div style="font-size:13px;color:#8e6f00;margin-bottom:4px">
+              <strong>${note.created_by_name || '未知'}</strong> · ${new Date(note.created_at).toLocaleString()}
+              ${note.created_at !== note.updated_at ? ` (修改于 ${new Date(note.updated_at).toLocaleString()})` : ''}
+            </div>
+            <div style="white-space:pre-wrap;color:#333;line-height:1.6">${escapeHtml(note.content)}</div>
+            ${['admin','lab_manager'].includes(currentUser.role) ? `
+              <div style="margin-top:6px;display:flex;gap:6px">
+                <button class="btn btn-xs" style="background:#eaf2f8;color:#2e86c1" onclick="showEditNoteModal(${note.id}, ${JSON.stringify(escapeHtml(note.content)).replace(/"/g, '&quot;')})">✏️ 修改</button>
+                <button class="btn btn-xs" style="background:#fadbd8;color:#c0392b" onclick="deleteNote(${note.id})">🗑️ 删除</button>
+              </div>` : ''}
+          </div>`;
+        });
+        h += '</div>';
+      }
+      if (['admin','lab_manager'].includes(currentUser.role)) {
+        h += `<button class="btn btn-xs" style="background:#fcf3cf;color:#7d6608;margin-bottom:12px" onclick="showAddNoteModal(${s.id}, '${s.week_key}')">➕ 添加结转说明</button>`;
+      }
+
       h += '<h4>器材快照</h4><table class="data-table compact"><thead><tr><th>器材</th><th>总量</th><th>可用</th><th>锁定</th></tr></thead><tbody>';
       s.totals.equipment_snapshot.forEach(eq => {
         h += `<tr><td>${eq.name}</td><td>${eq.total}</td><td>${eq.available}</td><td>${eq.locked}</td></tr>`;
@@ -324,6 +382,240 @@ async function loadSettlements() {
   }
   document.getElementById('settlement-list').innerHTML = h;
 }
+
+function escapeHtml(str) {
+  if (str == null) return '';
+  return String(str).replace(/[&<>"']/g, s => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[s]);
+}
+
+function toggleSettlementSelection(id) {
+  if (selectedSettlementIds.has(id)) {
+    selectedSettlementIds.delete(id);
+  } else {
+    if (selectedSettlementIds.size >= 2) {
+      toast('最多只能选择 2 条记录进行对比', 'warn');
+      loadSettlements();
+      return;
+    }
+    selectedSettlementIds.add(id);
+  }
+  loadSettlements();
+}
+
+function clearSettlementSelection() {
+  selectedSettlementIds.clear();
+  loadSettlements();
+}
+
+async function doCompare() {
+  const ids = Array.from(selectedSettlementIds);
+  if (ids.length !== 2) { toast('请先选择 2 条结转记录', 'warn'); return; }
+  try {
+    const result = await api('POST', '/api/settlements/compare', {
+      settlement_a_id: ids[0],
+      settlement_b_id: ids[1]
+    });
+    showCompareModal(result);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function exportDiffCsv() {
+  const ids = Array.from(selectedSettlementIds);
+  if (ids.length !== 2) { toast('请先选择 2 条结转记录', 'warn'); return; }
+  try {
+    const res = await fetch('/api/settlements/compare/export-csv', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        settlement_a_id: ids[0],
+        settlement_b_id: ids[1]
+      })
+    });
+    if (!res.ok) {
+      const data = await res.json();
+      throw new Error(data.error || '导出失败');
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const disposition = res.headers.get('Content-Disposition');
+    a.download = disposition && disposition.includes('filename=')
+      ? disposition.split('filename=')[1].replace(/"/g, '')
+      : `settlement-diff-${ids[0]}_vs_${ids[1]}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast('对比 CSV 导出成功');
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+function showCompareModal(result) {
+  const { settlement_a, settlement_b, diff } = result;
+  let h = '';
+  h += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">
+    <div style="background:#fdfefe;padding:10px;border-radius:6px;border:1px solid #d5dbdb">
+      <strong>A</strong> · ${settlement_a.week_key}
+      <div style="font-size:12px;color:#666">${settlement_a.source === 'imported' ? '导入视图' : (settlement_a.is_latest_settled ? '⭐ 最新结转' : '正式结转')} · ${new Date(settlement_a.settled_at).toLocaleString()}</div>
+    </div>
+    <div style="background:#fdfefe;padding:10px;border-radius:6px;border:1px solid #d5dbdb">
+      <strong>B</strong> · ${settlement_b.week_key}
+      <div style="font-size:12px;color:#666">${settlement_b.source === 'imported' ? '导入视图' : '正式结转'} · ${new Date(settlement_b.settled_at).toLocaleString()}</div>
+    </div>
+  </div>`;
+
+  const badge = (color, text) => `<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;background:${color};color:#fff;margin-right:4px">${text}</span>`;
+  const renderFieldDiff = (from, to) => {
+    if (typeof from === 'number' && typeof to === 'number') {
+      const d = to - from;
+      const arrow = d > 0 ? '↑' : (d < 0 ? '↓' : '=');
+      const cls = d > 0 ? '#27ae60' : (d < 0 ? '#e74c3c' : '#7f8c8d');
+      return `<span style="color:#7f8c8d">${from}</span> → <strong style="color:#2c3e50">${to}</strong> <span style="color:${cls};font-weight:bold">${arrow}${d !== 0 ? ' ' + (d > 0 ? '+' : '') + d : ''}</span>`;
+    }
+    const statusMap = { pending:'待审批', approved:'已审批', collected:'已领用', partially_returned:'部分归还', returned:'已归还', cancelled:'已取消' };
+    const mapS = s => statusMap[s] || s;
+    return `<span style="color:#7f8c8d">${mapS(from)}</span> → <strong style="color:#2980b9">${mapS(to)}</strong>`;
+  };
+
+  h += '<h3 style="margin-top:0">📦 器材快照差异</h3>';
+  const eq = diff.equipment_snapshot;
+  if (eq.added.length === 0 && eq.removed.length === 0 && eq.changed.length === 0) {
+    h += '<p style="color:#27ae60">✅ 器材快照无差异</p>';
+  } else {
+    h += '<table class="data-table compact" style="width:100%"><thead><tr><th>变化</th><th>器材</th><th>字段</th><th>变化详情 (A → B)</th></tr></thead><tbody>';
+    eq.added.forEach(e => {
+      h += `<tr><td>${badge('#27ae60','新增')}</td><td>${e.name}</td><td>全部</td><td>总量:${e.total} / 可用:${e.available} / 锁定:${e.locked}</td></tr>`;
+    });
+    eq.removed.forEach(e => {
+      h += `<tr><td>${badge('#e74c3c','减少')}</td><td>${e.name}</td><td>全部</td><td>总量:${e.total} / 可用:${e.available} / 锁定:${e.locked} (B 中消失)</td></tr>`;
+    });
+    eq.changed.forEach(e => {
+      const fieldLabel = { total:'总量', available:'可用', locked:'锁定' };
+      Object.entries(e.changes).forEach(([f, ch]) => {
+        h += `<tr><td>${badge('#f39c12','变化')}</td><td>${e.name}</td><td>${fieldLabel[f] || f}</td><td>${renderFieldDiff(ch.from, ch.to)}</td></tr>`;
+      });
+    });
+    h += '</tbody></table>';
+  }
+
+  h += '<h3 style="margin-top:20px">📅 预约汇总差异</h3>';
+  const rs = diff.reservation_summary;
+  h += `<p>预约总数变化: <strong style="color:${rs.total_diff > 0 ? '#27ae60' : (rs.total_diff < 0 ? '#e74c3c' : '#7f8c8d')}">${rs.total_diff > 0 ? '+' : ''}${rs.total_diff} 条</strong></p>`;
+  if (rs.added.length === 0 && rs.removed.length === 0 && rs.changed.length === 0) {
+    h += '<p style="color:#27ae60">✅ 各状态预约条数无差异</p>';
+  } else {
+    h += '<table class="data-table compact" style="width:100%"><thead><tr><th>变化</th><th>状态</th><th>变化详情 (A → B)</th></tr></thead><tbody>';
+    rs.added.forEach(s => h += `<tr><td>${badge('#27ae60','新增')}</td><td>${STATUS_MAP[s.status] || s.status}</td><td>0 → ${s.count} (+${s.count})</td></tr>`);
+    rs.removed.forEach(s => h += `<tr><td>${badge('#e74c3c','减少')}</td><td>${STATUS_MAP[s.status] || s.status}</td><td>${s.count} → 0 (-${s.count})</td></tr>`);
+    rs.changed.forEach(s => h += `<tr><td>${badge('#f39c12','变化')}</td><td>${STATUS_MAP[s.status] || s.status}</td><td>${renderFieldDiff(s.from, s.to)}</td></tr>`);
+    h += '</tbody></table>';
+  }
+
+  h += '<h3 style="margin-top:20px">💥 损耗汇总差异</h3>';
+  const ls = diff.loss_summary;
+  h += '<table class="data-table compact" style="width:100%"><thead><tr><th>指标</th><th>A</th><th>B</th><th>差异</th></tr></thead><tbody>';
+  h += `<tr><td>损耗申报数</td><td>${ls.a_reports}</td><td>${ls.b_reports}</td><td style="color:${ls.reports_diff > 0 ? '#27ae60' : (ls.reports_diff < 0 ? '#e74c3c' : '#7f8c8d')}"><strong>${ls.reports_diff > 0 ? '+' : ''}${ls.reports_diff} 条</strong></td></tr>`;
+  h += `<tr><td>损耗件数</td><td>${ls.a_qty}</td><td>${ls.b_qty}</td><td style="color:${ls.qty_diff > 0 ? '#27ae60' : (ls.qty_diff < 0 ? '#e74c3c' : '#7f8c8d')}"><strong>${ls.qty_diff > 0 ? '+' : ''}${ls.qty_diff} 件</strong></td></tr>`;
+  h += '</tbody></table>';
+
+  h += '<h3 style="margin-top:20px">📤 待归还差异</h3>';
+  const pr = diff.pending_returns;
+  if (pr.added.length === 0 && pr.removed.length === 0 && pr.changed.length === 0) {
+    h += '<p style="color:#27ae60">✅ 待归还无差异</p>';
+  } else {
+    h += '<table class="data-table compact" style="width:100%"><thead><tr><th>变化</th><th>器材</th><th>字段</th><th>变化详情 (A → B)</th></tr></thead><tbody>';
+    pr.added.forEach(p => {
+      h += `<tr><td>${badge('#27ae60','新增')}</td><td>${p.equipment_name}</td><td>数量</td><td>0 → ${p.qty} (+${p.qty})</td></tr>`;
+      h += `<tr><td>${badge('#27ae60','新增')}</td><td>${p.equipment_name}</td><td>状态</td><td>无 → ${STATUS_MAP[p.status] || p.status}</td></tr>`;
+    });
+    pr.removed.forEach(p => {
+      h += `<tr><td>${badge('#e74c3c','减少')}</td><td>${p.equipment_name}</td><td>数量</td><td>${p.qty} → 0 (-${p.qty})</td></tr>`;
+      h += `<tr><td>${badge('#e74c3c','减少')}</td><td>${p.equipment_name}</td><td>状态</td><td>${STATUS_MAP[p.status] || p.status} → 无 (B 中无此待归还)</td></tr>`;
+    });
+    pr.changed.forEach(p => {
+      Object.entries(p.changes).forEach(([f, ch]) => {
+        const label = f === 'qty' ? '数量' : '状态';
+        h += `<tr><td>${badge(f === 'status' ? '#8e44ad' : '#f39c12', f === 'status' ? '状态变化' : '变化')}</td><td>${p.equipment_name}</td><td>${label}</td><td>${renderFieldDiff(ch.from, ch.to)}</td></tr>`;
+      });
+    });
+    h += '</tbody></table>';
+  }
+
+  if (['admin','lab_manager'].includes(currentUser.role)) {
+    h += `<div style="margin-top:18px;text-align:right">
+      <button class="btn btn-success" onclick="exportDiffCsv();closeModal()">📊 导出此对比为 CSV</button>
+    </div>`;
+  }
+
+  showModal(`差异对比 · ${settlement_a.week_key} ↔ ${settlement_b.week_key}`, h);
+}
+
+function showAddNoteModal(settlementId, weekKey) {
+  let html = `<form id="note-form">
+    <div class="form-group">
+      <label>为 <strong>${weekKey}</strong> 结转添加说明</label>
+      <textarea id="note-content" rows="5" required style="width:100%;padding:8px;resize:vertical;font-family:inherit" placeholder="请输入对账说明、异常原因、后续处理计划等留痕信息..."></textarea>
+    </div>
+    <p class="form-hint" style="color:#666">⚠️ 说明将公开给所有登录用户查看，并记录操作日志。</p>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button type="submit" class="btn btn-primary" style="flex:1">💾 保存说明</button>
+      <button type="button" class="btn" style="flex:1;background:#eee;color:#555" onclick="closeModal()">取消</button>
+    </div>
+  </form>`;
+  showModal(`添加结转说明 · ${weekKey}`, html);
+  document.getElementById('note-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const content = document.getElementById('note-content').value;
+    try {
+      await api('POST', `/api/settlements/${settlementId}/notes`, { content });
+      closeModal();
+      toast('说明已添加');
+      loadSettlements();
+    } catch (err) { toast(err.message, 'error'); }
+  };
+}
+
+function showEditNoteModal(noteId, oldContent) {
+  const decoded = oldContent.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'");
+  let html = `<form id="edit-note-form">
+    <div class="form-group">
+      <label>修改结转说明</label>
+      <textarea id="edit-note-content" rows="5" required style="width:100%;padding:8px;resize:vertical;font-family:inherit"></textarea>
+    </div>
+    <p class="form-hint" style="color:#666">💡 修改记录会反映在更新时间上，所有用户可查。</p>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button type="submit" class="btn btn-primary" style="flex:1">💾 保存修改</button>
+      <button type="button" class="btn" style="flex:1;background:#eee;color:#555" onclick="closeModal()">取消</button>
+    </div>
+  </form>`;
+  showModal('修改结转说明', html);
+  document.getElementById('edit-note-content').value = decoded;
+  document.getElementById('edit-note-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const content = document.getElementById('edit-note-content').value;
+    try {
+      await api('PUT', `/api/settlements/notes/${noteId}`, { content });
+      closeModal();
+      toast('说明已更新');
+      loadSettlements();
+    } catch (err) { toast(err.message, 'error'); }
+  };
+}
+
+async function deleteNote(noteId) {
+  if (!confirm('确认删除此结转说明？删除后无法恢复。')) return;
+  try {
+    await api('DELETE', `/api/settlements/notes/${noteId}`);
+    toast('说明已删除');
+    loadSettlements();
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+window.idsForCompare = [];
 
 async function showRevokeLatestModal() {
   try {

@@ -1,0 +1,82 @@
+{
+  "equipment": [
+    {
+      "id": 1,
+      "name": "示波器",
+      "total": 10,
+      "avail": 7,
+      "locked": 3
+    },
+    {
+      "id": 2,
+      "name": "万用表",
+      "total": 5,
+      "avail": 5,
+      "locked": 0
+    },
+    {
+      "id": 3,
+      "name": "烧杯",
+      "total": 50,
+      "avail": 50,
+      "locked": 0
+    },
+    {
+      "id": 4,
+      "name": "显微镜",
+      "total": 2,
+      "avail": 2,
+      "locked": 0
+    },
+    {
+      "id": 5,
+      "name": "试管",
+      "total": 100,
+      "avail": 100,
+      "locked": 0
+    }
+  ],
+  "settlements": [
+    {
+      "id": 1,
+      "week_key": "2026-W24",
+      "source": "settled",
+      "is_latest_settled": true,
+      "notes_count": 1,
+      "notes_content": [
+        {
+          "id": 1,
+          "content": "2026-W24 对账说明：显微镜1件损耗，确认原因是学生操作不当，已教育；后续走采购流程补充。",
+          "updated_at": "2026-06-16T18:53:27.479Z",
+          "created_by_name": "王五(实验员)"
+        }
+      ],
+      "equipment_snapshot_count": 5,
+      "reservation_total": 1
+    }
+  ],
+  "latestInfo": {
+    "has_latest": true,
+    "week_key": "2026-W24",
+    "id": 1,
+    "settled_at": "2026-06-16T18:53:27.448Z"
+  },
+  "logActions": [
+    "revoke_weekly_settlement",
+    "export_settlement_diff_csv",
+    "compare_settlements",
+    "add_settlement_note",
+    "delete_settlement_note",
+    "update_settlement_note",
+    "weekly_settlement",
+    "approve_reservation",
+    "create_reservation",
+    "approve_loss_report",
+    "resolution_update_status_to_returned",
+    "submit_loss_report",
+    "return_equipment",
+    "collect_equipment",
+    "login",
+    "system_init"
+  ]
+}

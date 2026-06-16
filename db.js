@@ -57,6 +57,61 @@ function runMigrations() {
     db.run('ALTER TABLE weekly_settlements ADD COLUMN revoked_by INTEGER REFERENCES users(id)');
     saveToFile();
   }
+
+  const existingTables = all("SELECT name FROM sqlite_master WHERE type='table'").map(r => r.name);
+
+  if (!existingTables.includes('settlement_notes')) {
+    db.run(`
+      CREATE TABLE IF NOT EXISTS settlement_notes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        settlement_id INTEGER NOT NULL REFERENCES weekly_settlements(id),
+        week_key TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_by INTEGER REFERENCES users(id),
+        created_by_name TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+    saveToFile();
+  }
+
+  if (!existingTables.includes('settlement_comparisons')) {
+    db.run(`
+      CREATE TABLE IF NOT EXISTS settlement_comparisons (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        settlement_a_id INTEGER NOT NULL REFERENCES weekly_settlements(id),
+        settlement_b_id INTEGER NOT NULL REFERENCES weekly_settlements(id),
+        week_key_a TEXT NOT NULL,
+        week_key_b TEXT NOT NULL,
+        diff_summary TEXT NOT NULL,
+        created_by INTEGER REFERENCES users(id),
+        created_by_name TEXT,
+        created_at TEXT NOT NULL
+      );
+    `);
+    saveToFile();
+  }
+
+  if (!existingTables.includes('settlement_exports')) {
+    db.run(`
+      CREATE TABLE IF NOT EXISTS settlement_exports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type TEXT NOT NULL CHECK(type IN ('single','comparison')),
+        settlement_id INTEGER REFERENCES weekly_settlements(id),
+        comparison_id INTEGER REFERENCES settlement_comparisons(id),
+        week_key_a TEXT,
+        week_key_b TEXT,
+        export_format TEXT NOT NULL DEFAULT 'csv',
+        filename TEXT NOT NULL,
+        row_count INTEGER NOT NULL DEFAULT 0,
+        created_by INTEGER REFERENCES users(id),
+        created_by_name TEXT,
+        created_at TEXT NOT NULL
+      );
+    `);
+    saveToFile();
+  }
 }
 
 function createTables() {
@@ -141,6 +196,47 @@ function createTables() {
       user_id INTEGER REFERENCES users(id),
       user_name TEXT,
       details TEXT,
+      created_at TEXT NOT NULL
+    );
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS settlement_notes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      settlement_id INTEGER NOT NULL REFERENCES weekly_settlements(id),
+      week_key TEXT NOT NULL,
+      content TEXT NOT NULL,
+      created_by INTEGER REFERENCES users(id),
+      created_by_name TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS settlement_comparisons (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      settlement_a_id INTEGER NOT NULL REFERENCES weekly_settlements(id),
+      settlement_b_id INTEGER NOT NULL REFERENCES weekly_settlements(id),
+      week_key_a TEXT NOT NULL,
+      week_key_b TEXT NOT NULL,
+      diff_summary TEXT NOT NULL,
+      created_by INTEGER REFERENCES users(id),
+      created_by_name TEXT,
+      created_at TEXT NOT NULL
+    );
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS settlement_exports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      type TEXT NOT NULL CHECK(type IN ('single','comparison')),
+      settlement_id INTEGER REFERENCES weekly_settlements(id),
+      comparison_id INTEGER REFERENCES settlement_comparisons(id),
+      week_key_a TEXT,
+      week_key_b TEXT,
+      export_format TEXT NOT NULL DEFAULT 'csv',
+      filename TEXT NOT NULL,
+      row_count INTEGER NOT NULL DEFAULT 0,
+      created_by INTEGER REFERENCES users(id),
+      created_by_name TEXT,
       created_at TEXT NOT NULL
     );
   `);
@@ -286,6 +382,124 @@ function hasActiveSettlementByWeekAndSource(weekKey, source) {
   return row && row.cnt > 0;
 }
 
+function cleanupSettlementRelatedData(settlementId) {
+  run('DELETE FROM settlement_notes WHERE settlement_id = ?', [settlementId]);
+  run('DELETE FROM settlement_comparisons WHERE settlement_a_id = ? OR settlement_b_id = ?', [settlementId, settlementId]);
+  run('DELETE FROM settlement_exports WHERE settlement_id = ?', [settlementId]);
+  run(`
+    DELETE FROM settlement_exports
+    WHERE comparison_id IN (
+      SELECT id FROM settlement_comparisons WHERE settlement_a_id = ? OR settlement_b_id = ?
+    )
+  `, [settlementId, settlementId]);
+  saveToFile();
+}
+
+function getNotesBySettlementId(settlementId) {
+  return all(
+    'SELECT * FROM settlement_notes WHERE settlement_id = ? ORDER BY created_at DESC',
+    [settlementId]
+  );
+}
+
+function computeSettlementDiff(settlementA, settlementB) {
+  const totalsA = typeof settlementA.totals === 'string' ? JSON.parse(settlementA.totals) : settlementA.totals;
+  const totalsB = typeof settlementB.totals === 'string' ? JSON.parse(settlementB.totals) : settlementB.totals;
+
+  const result = {
+    equipment_snapshot: { added: [], removed: [], changed: [] },
+    reservation_summary: { added: [], removed: [], changed: [], total_diff: 0 },
+    loss_summary: {},
+    pending_returns: { added: [], removed: [], changed: [] }
+  };
+
+  const eqMapA = {};
+  (totalsA.equipment_snapshot || []).forEach(e => { eqMapA[e.id] = e; });
+  const eqMapB = {};
+  (totalsB.equipment_snapshot || []).forEach(e => { eqMapB[e.id] = e; });
+
+  const allEqIds = new Set([...Object.keys(eqMapA), ...Object.keys(eqMapB)]);
+  allEqIds.forEach(id => {
+    const a = eqMapA[id];
+    const b = eqMapB[id];
+    if (!a && b) {
+      result.equipment_snapshot.added.push({ id: b.id, name: b.name, total: b.total, available: b.available, locked: b.locked });
+    } else if (a && !b) {
+      result.equipment_snapshot.removed.push({ id: a.id, name: a.name, total: a.total, available: a.available, locked: a.locked });
+    } else if (a && b) {
+      const changes = {};
+      if (a.total !== b.total) changes.total = { from: a.total, to: b.total };
+      if (a.available !== b.available) changes.available = { from: a.available, to: b.available };
+      if (a.locked !== b.locked) changes.locked = { from: a.locked, to: b.locked };
+      if (Object.keys(changes).length > 0) {
+        result.equipment_snapshot.changed.push({ id: a.id, name: a.name, changes });
+      }
+    }
+  });
+
+  const rsA = totalsA.reservation_summary || { total: 0, by_status: {} };
+  const rsB = totalsB.reservation_summary || { total: 0, by_status: {} };
+  result.reservation_summary.total_diff = (rsB.total || 0) - (rsA.total || 0);
+
+  const allStatuses = new Set([
+    ...Object.keys(rsA.by_status || {}),
+    ...Object.keys(rsB.by_status || {})
+  ]);
+  allStatuses.forEach(status => {
+    const a = rsA.by_status[status] || 0;
+    const b = rsB.by_status[status] || 0;
+    if (a === 0 && b > 0) {
+      result.reservation_summary.added.push({ status, count: b });
+    } else if (a > 0 && b === 0) {
+      result.reservation_summary.removed.push({ status, count: a });
+    } else if (a !== b) {
+      result.reservation_summary.changed.push({ status, from: a, to: b, diff: b - a });
+    }
+  });
+
+  const lsA = totalsA.loss_summary || { total_reports: 0, total_qty: 0 };
+  const lsB = totalsB.loss_summary || { total_reports: 0, total_qty: 0 };
+  result.loss_summary = {
+    reports_diff: (lsB.total_reports || 0) - (lsA.total_reports || 0),
+    qty_diff: (lsB.total_qty || 0) - (lsA.total_qty || 0),
+    a_reports: lsA.total_reports || 0,
+    b_reports: lsB.total_reports || 0,
+    a_qty: lsA.total_qty || 0,
+    b_qty: lsB.total_qty || 0
+  };
+
+  const prMapA = {};
+  (totalsA.pending_returns || []).forEach(pr => { prMapA[pr.id] = pr; });
+  const prMapB = {};
+  (totalsB.pending_returns || []).forEach(pr => { prMapB[pr.id] = pr; });
+
+  const allPrIds = new Set([...Object.keys(prMapA), ...Object.keys(prMapB)]);
+  allPrIds.forEach(id => {
+    const a = prMapA[id];
+    const b = prMapB[id];
+    if (!a && b) {
+      result.pending_returns.added.push({
+        id: b.id, equipment_name: b.equipment_name, qty: b.qty, status: b.status
+      });
+    } else if (a && !b) {
+      result.pending_returns.removed.push({
+        id: a.id, equipment_name: a.equipment_name, qty: a.qty, status: a.status
+      });
+    } else if (a && b) {
+      const changes = {};
+      if (a.qty !== b.qty) changes.qty = { from: a.qty, to: b.qty };
+      if (a.status !== b.status) changes.status = { from: a.status, to: b.status };
+      if (Object.keys(changes).length > 0) {
+        result.pending_returns.changed.push({
+          id: a.id, equipment_name: a.equipment_name, changes
+        });
+      }
+    }
+  });
+
+  return result;
+}
+
 module.exports = {
   initDatabase,
   run,
@@ -298,5 +512,8 @@ module.exports = {
   getCurrentWeekKey,
   getLatestSettlement,
   getActiveSettlementByWeek,
-  hasActiveSettlementByWeekAndSource
+  hasActiveSettlementByWeekAndSource,
+  cleanupSettlementRelatedData,
+  getNotesBySettlementId,
+  computeSettlementDiff
 };
