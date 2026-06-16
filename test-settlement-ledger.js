@@ -242,6 +242,13 @@ async function runTests() {
   assert(invalidItem.invalidated_by_user_name !== undefined, '失效记录包含失效人');
   assert(invalidItem.invalidated_reason === '撤销周结转', '失效原因正确');
   assert(invalidItem.last_cleaned_stats !== undefined, '失效记录包含清理统计');
+  console.log('  调试 - last_cleaned_stats:', JSON.stringify(invalidItem.last_cleaned_stats));
+  console.log('  调试 - invalidItem:', JSON.stringify({
+    id: invalidItem.id,
+    type: invalidItem.type,
+    settlement_id: invalidItem.settlement_id,
+    comparison_id: invalidItem.comparison_id
+  }));
   assert(invalidItem.last_cleaned_stats.cleaned_notes !== undefined, '清理统计包含 cleaned_notes');
   assert(invalidItem.last_cleaned_stats.cleaned_exports_total !== undefined, '清理统计包含 cleaned_exports_total');
 

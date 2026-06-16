@@ -186,41 +186,52 @@ npm start
 **目的**: 管理员和实验员可以在台账中追溯所有导出操作的完整历史，包括失效记录，支持多维度筛选和台账导出。教师角色无法访问。
 
 1. 登录 `admin / admin123` 或 `wangwu / 123456`（管理员/实验员角色）
-2. 调用台账列表接口 `GET /api/settlements/ledger`，支持以下筛选参数：
-   - `week_start` / `week_end`: 周次范围筛选（如 `week_start=2026-W20&week_end=2026-W30`）
-   - `type`: 导出类型筛选（`single`=单周 JSON / `comparison`=对比 CSV）
-   - `operator`: 操作人用户名筛选
-   - `invalid`: 是否失效筛选（`0`=有效 / `1`=失效 / 不传=全部）
-   - 示例：`GET /api/settlements/ledger?type=single&invalid=0&operator=admin`
-3. 列表字段说明：
+2. **前端入口**（两种方式）：
+   - 方式一：侧边栏点击「📤 导出历史」或「📒 复盘台账」
+   - 方式二：在「周结转」页面操作栏点击「📤 导出历史」或「📒 复盘台账」按钮
+   - 教师登录后看不到这两个导航项和按钮
+3. 调用台账列表接口 `GET /api/settlements/ledger`，支持以下筛选参数：
+   - `week_key_start` / `week_key_end`: 周次范围筛选（如 `week_key_start=2026-W20&week_key_end=2026-W30`）
+   - `export_type`: 导出类型筛选（`single`=单周 JSON / `comparison`=对比 CSV）
+   - `operator`: 操作人筛选（支持用户名或姓名模糊匹配，如 `operator=admin` 或 `operator=王五`）
+   - `invalid`: 是否失效筛选（`false`=有效 / `true`=已失效 / 不传=全部）
+   - 示例：`GET /api/settlements/ledger?export_type=single&invalid=false&operator=admin`
+4. 列表字段说明：
    - `week_key_a` / `week_key_b`: 来源周次（对比 CSV 有两个周次，单周 JSON 只有 week_key_a）
+   - `type`: 导出类型（`single` 或 `comparison`）
    - `filename`: 导出文件名
    - `row_count`: 导出数据行数
-   - `related_note_count`: 关联说明条数
-   - `last_cleaned_stats`: 最近一次清理统计（包含 `cleaned_notes`、`cleaned_exports_total` 等 5 项）
+   - `related_note_count`: 关联说明条数（实时计算）
+   - `last_cleaned_stats`: 最近一次清理统计（包含 `cleaned_notes`、`cleaned_exports_total` 等 5 项，带 `cleaned_` 前缀）
    - `invalid`: 是否失效（0=有效，1=失效）
-   - `invalidated_at` / `invalidated_by` / `invalidated_reason`: 失效时间/失效人/失效原因
-4. 调用台账详情接口 `GET /api/settlements/ledger/:id`，可看到：
+   - `invalidated_at` / `invalidated_by_user_name` / `invalidated_reason`: 失效时间/失效人姓名/失效原因
+   - `created_by_user_name`: 操作人姓名
+   - `created_by_username`: 操作人用户名
+5. 调用台账详情接口 `GET /api/settlements/ledger/:id`，可看到：
    - `type`: 区分 `single`（普通 JSON）还是 `comparison`（对比 CSV）
    - `comparison_id`: 关联的对比记录 ID（仅对比 CSV 有值）
-   - `operator_username`: 操作人用户名
+   - `comparison_diff_summary`: 关联对比的差异摘要（仅对比 CSV 有值）
+   - `created_by_user_name` / `created_by_username`: 操作人姓名和用户名
    - `created_at`: 导出时间
-5. 调用台账导出接口 `GET /api/settlements/ledger/export/csv`，可导出完整台账 CSV（UTF-8 BOM，Excel 可直接打开）
-6. 台账与操作联动验证：
-   - **撤销结转**：该周次关联的所有导出记录自动标记为失效，失效原因为「周结转已撤销」，`invalidated_by` 标记操作人
-   - **移除导入**：该周次关联的所有导出记录自动标记为失效，失效原因为「导入视图已移除」
+6. 调用台账导出接口 `GET /api/settlements/ledger/export/csv`，可导出完整台账 CSV（UTF-8 BOM，Excel 可直接打开）
+7. 台账与操作联动验证：
+   - **撤销结转**：该周次（作为 A 周或 B 周）关联的所有导出记录自动标记为失效，失效原因为「撤销周结转」，`invalidated_by` 标记操作人
+   - **移除导入**：该导入周次关联的所有导出记录自动标记为失效，失效原因为「移除导入结转」
    - **再次导出同一周次**：产生新的有效记录，旧记录保持原状态不变（有效继续有效，失效继续失效）
-7. 权限验证：
+   - **失效记录收口**：导出历史页面自动过滤失效记录，仅台账页面能看到全部记录
+8. 权限验证：
    - 登录 `zhangsan / 123456`（教师角色）
+   - 侧边栏不显示「导出历史」和「复盘台账」导航项
+   - 周结转页面操作栏不显示「导出历史」和「复盘台账」按钮
    - 调用 `GET /api/settlements/ledger` → 返回 403「权限不足」
    - 调用 `GET /api/settlements/ledger/export/csv` → 返回 403「权限不足」
    - 教师只能看普通结转和差异对比，不能进入台账
-8. 重启验证：
+9. 重启验证：
    - 停止服务器后重启，台账的筛选结果、统计口径、失效状态、清理统计数据**完全一致**
    - 重启后再次执行撤销/导出操作，联动逻辑正常工作
 
 **台账 CSV 导出字段**（共 19 列）：
-`id, week_key_a, week_key_b, type, filename, row_count, comparison_id, comparison_name, created_at, operator_id, operator_username, invalid, invalidated_at, invalidated_by, invalidated_reason, last_cleaned_stats, related_note_count, settlement_id, settlement_b_id`
+`导出ID, 来源周次, 导出类型, 文件格式, 文件名, 行数, 关联说明条数, 状态, 操作人, 导出时间, 失效原因, 失效人, 失效时间, 清理说明数, 清理对比数, 清理单周导出数, 清理对比导出数, 清理总导出数`
 
 ---
 
@@ -341,10 +352,11 @@ npm start
    - 再次导出同一周次时，产生新的有效记录，旧记录状态保持不变
 
 3. **筛选和统计口径**：
-   - 台账列表默认显示全部记录（有效+失效），可通过 `invalid` 参数筛选
-   - 周次范围筛选仅作用于 `week_key_a`（单周和对比 CSV 的 A 周）
+   - 台账列表默认显示全部记录（有效+失效），可通过 `invalid` 参数筛选（`true`/`false`）
+   - 周次范围筛选作用于 `week_key_a` 和 `week_key_b`（对比 CSV 的两个周次都会被匹配）
+   - `operator` 参数支持用户名或姓名模糊匹配（如 `operator=admin` 或 `operator=王五`）
    - `related_note_count` 为实时计算的关联说明条数，不受失效标记影响
-   - `last_cleaned_stats` 存储该记录最后一次被清理时的统计数据（含 `cleaned_*` 前缀）
+   - `last_cleaned_stats` 存储该记录最后一次被清理时的统计数据（含 `cleaned_*` 前缀，共 5 项）
 
 4. **联动规则**：
    - 撤销结转：该周次（作为 A 周或 B 周）关联的所有导出记录全部失效

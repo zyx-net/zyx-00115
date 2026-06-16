@@ -463,11 +463,11 @@ app.delete('/api/settlements/:week_key/revoke', requireRole('admin', 'lab_manage
     reservation_total: totals.reservation_summary ? totals.reservation_summary.total : 0,
     loss_qty: totals.loss_summary ? totals.loss_summary.total_qty : 0,
     pending_returns: totals.pending_returns ? totals.pending_returns.length : 0,
-    cleaned_notes: relatedCount.notes,
-    cleaned_comparisons: relatedCount.comparisons,
-    cleaned_exports_single: relatedCount.exports_single,
-    cleaned_exports_comparison: relatedCount.exports_comparison,
-    cleaned_exports_total: relatedCount.exports_total
+    cleaned_notes: relatedCount.cleaned_notes,
+    cleaned_comparisons: relatedCount.cleaned_comparisons,
+    cleaned_exports_single: relatedCount.cleaned_exports_single,
+    cleaned_exports_comparison: relatedCount.cleaned_exports_comparison,
+    cleaned_exports_total: relatedCount.cleaned_exports_total
   });
   db.forceSave();
 
@@ -578,11 +578,11 @@ app.delete('/api/settlements/:week_key/remove-import', requireRole('admin', 'lab
   db.addLog('remove_imported_settlement', req.user.id, req.user.name, {
     week_key: wk,
     settlement_id: target.id,
-    cleaned_notes: relatedCount.notes,
-    cleaned_comparisons: relatedCount.comparisons,
-    cleaned_exports_single: relatedCount.exports_single,
-    cleaned_exports_comparison: relatedCount.exports_comparison,
-    cleaned_exports_total: relatedCount.exports_total
+    cleaned_notes: relatedCount.cleaned_notes,
+    cleaned_comparisons: relatedCount.cleaned_comparisons,
+    cleaned_exports_single: relatedCount.cleaned_exports_single,
+    cleaned_exports_comparison: relatedCount.cleaned_exports_comparison,
+    cleaned_exports_total: relatedCount.cleaned_exports_total
   });
   db.forceSave();
   res.json({ ok: true, week_key: wk, revoked_at: now, cleaned: relatedCount });
@@ -883,6 +883,7 @@ app.get('/api/settlements/ledger', requireRole('admin', 'lab_manager'), (req, re
     week_key_end: req.query.week_key_end,
     export_type: req.query.export_type,
     export_format: req.query.export_format,
+    operator: req.query.operator,
     created_by: req.query.created_by ? parseInt(req.query.created_by) : undefined,
     invalid: req.query.invalid !== undefined ? req.query.invalid === 'true' : undefined
   };
@@ -897,6 +898,7 @@ app.get('/api/settlements/ledger/summary', requireRole('admin', 'lab_manager'), 
     week_key_end: req.query.week_key_end,
     export_type: req.query.export_type,
     export_format: req.query.export_format,
+    operator: req.query.operator,
     created_by: req.query.created_by ? parseInt(req.query.created_by) : undefined,
     invalid: req.query.invalid !== undefined ? req.query.invalid === 'true' : undefined
   };

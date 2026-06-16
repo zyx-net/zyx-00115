@@ -435,11 +435,11 @@ function countRelatedCleanup(settlementId) {
     [settlementId, settlementId]
   ).c;
   return {
-    notes: noteCount,
-    comparisons: comparisonCount,
-    exports_single: exportSingleCount,
-    exports_comparison: exportComparisonCount,
-    exports_total: exportSingleCount + exportComparisonCount
+    cleaned_notes: noteCount,
+    cleaned_comparisons: comparisonCount,
+    cleaned_exports_single: exportSingleCount,
+    cleaned_exports_comparison: exportComparisonCount,
+    cleaned_exports_total: exportSingleCount + exportComparisonCount
   };
 }
 
@@ -597,11 +597,11 @@ function invalidateExportsBySettlementId(settlementId, invalidatedBy, invalidate
   let statsToSave = null;
   if (cleanedStats) {
     statsToSave = {
-      cleaned_notes: cleanedStats.notes || 0,
-      cleaned_comparisons: cleanedStats.comparisons || 0,
-      cleaned_exports_single: cleanedStats.exports_single || 0,
-      cleaned_exports_comparison: cleanedStats.exports_comparison || 0,
-      cleaned_exports_total: cleanedStats.exports_total || 0
+      cleaned_notes: cleanedStats.cleaned_notes !== undefined ? cleanedStats.cleaned_notes : 0,
+      cleaned_comparisons: cleanedStats.cleaned_comparisons !== undefined ? cleanedStats.cleaned_comparisons : 0,
+      cleaned_exports_single: cleanedStats.cleaned_exports_single !== undefined ? cleanedStats.cleaned_exports_single : 0,
+      cleaned_exports_comparison: cleanedStats.cleaned_exports_comparison !== undefined ? cleanedStats.cleaned_exports_comparison : 0,
+      cleaned_exports_total: cleanedStats.cleaned_exports_total !== undefined ? cleanedStats.cleaned_exports_total : 0
     };
   }
   const statsJson = statsToSave ? JSON.stringify(statsToSave) : null;
@@ -637,7 +637,9 @@ function getLedgerExports(filters = {}) {
   let sql = `
     SELECT se.*,
            u.name AS created_by_user_name,
-           iv.name AS invalidated_by_user_name
+           u.username AS created_by_username,
+           iv.name AS invalidated_by_user_name,
+           iv.username AS invalidated_by_username
     FROM settlement_exports se
     LEFT JOIN users u ON se.created_by = u.id
     LEFT JOIN users iv ON se.invalidated_by = iv.id
@@ -661,6 +663,10 @@ function getLedgerExports(filters = {}) {
     sql += " AND se.export_format = ?";
     params.push(filters.export_format);
   }
+  if (filters.operator) {
+    sql += " AND (u.username LIKE ? OR u.name LIKE ?)";
+    params.push(`%${filters.operator}%`, `%${filters.operator}%`);
+  }
   if (filters.created_by) {
     sql += " AND se.created_by = ?";
     params.push(filters.created_by);
@@ -677,11 +683,28 @@ function getLedgerExports(filters = {}) {
   rows.forEach(row => {
     if (row.last_cleaned_stats) {
       try {
-        row.last_cleaned_stats = JSON.parse(row.last_cleaned_stats);
+        let stats = typeof row.last_cleaned_stats === 'string' ? JSON.parse(row.last_cleaned_stats) : row.last_cleaned_stats;
+        if (stats && typeof stats === 'object') {
+          const normalized = {};
+          normalized.cleaned_notes = stats.notes !== undefined ? stats.notes : 
+                                   (stats.cleaned_notes !== undefined ? stats.cleaned_notes : 0);
+          normalized.cleaned_comparisons = stats.comparisons !== undefined ? stats.comparisons :
+                                       (stats.cleaned_comparisons !== undefined ? stats.cleaned_comparisons : 0);
+          normalized.cleaned_exports_single = stats.exports_single !== undefined ? stats.exports_single :
+                                            (stats.cleaned_exports_single !== undefined ? stats.cleaned_exports_single : 0);
+          normalized.cleaned_exports_comparison = stats.exports_comparison !== undefined ? stats.exports_comparison :
+                                                (stats.cleaned_exports_comparison !== undefined ? stats.cleaned_exports_comparison : 0);
+          normalized.cleaned_exports_total = stats.exports_total !== undefined ? stats.exports_total :
+                                           (stats.cleaned_exports_total !== undefined ? stats.cleaned_exports_total : 0);
+          row.last_cleaned_stats = normalized;
+        } else {
+          row.last_cleaned_stats = null;
+        }
       } catch (e) {
         row.last_cleaned_stats = null;
       }
     }
+    
     if (row.settlement_id) {
       row.related_note_count = getRelatedNoteCount(row.settlement_id);
       if (!row.last_cleaned_stats) {
@@ -699,7 +722,9 @@ function getLedgerExportById(id) {
   const row = get(
     `SELECT se.*,
             u.name AS created_by_user_name,
+            u.username AS created_by_username,
             iv.name AS invalidated_by_user_name,
+            iv.username AS invalidated_by_username,
             sc.settlement_a_id, sc.settlement_b_id,
             sc.diff_summary AS comparison_diff_summary
      FROM settlement_exports se
@@ -714,7 +739,23 @@ function getLedgerExportById(id) {
 
   if (row.last_cleaned_stats) {
     try {
-      row.last_cleaned_stats = JSON.parse(row.last_cleaned_stats);
+      let stats = typeof row.last_cleaned_stats === 'string' ? JSON.parse(row.last_cleaned_stats) : row.last_cleaned_stats;
+      if (stats && typeof stats === 'object') {
+        const normalized = {};
+        normalized.cleaned_notes = stats.notes !== undefined ? stats.notes : 
+                                 (stats.cleaned_notes !== undefined ? stats.cleaned_notes : 0);
+        normalized.cleaned_comparisons = stats.comparisons !== undefined ? stats.comparisons :
+                                     (stats.cleaned_comparisons !== undefined ? stats.cleaned_comparisons : 0);
+        normalized.cleaned_exports_single = stats.exports_single !== undefined ? stats.exports_single :
+                                          (stats.cleaned_exports_single !== undefined ? stats.cleaned_exports_single : 0);
+        normalized.cleaned_exports_comparison = stats.exports_comparison !== undefined ? stats.exports_comparison :
+                                     (stats.cleaned_exports_comparison !== undefined ? stats.cleaned_exports_comparison : 0);
+        normalized.cleaned_exports_total = stats.exports_total !== undefined ? stats.exports_total :
+                                         (stats.cleaned_exports_total !== undefined ? stats.cleaned_exports_total : 0);
+        row.last_cleaned_stats = normalized;
+      } else {
+        row.last_cleaned_stats = null;
+      }
     } catch (e) {
       row.last_cleaned_stats = null;
     }
@@ -748,6 +789,7 @@ function getLedgerSummary(filters = {}) {
       SUM(CASE WHEN se.invalid = 0 THEN 1 ELSE 0 END) AS valid_count,
       SUM(se.row_count) AS total_rows
     FROM settlement_exports se
+    LEFT JOIN users u ON se.created_by = u.id
     WHERE 1=1
   `;
   const params = [];
@@ -767,6 +809,10 @@ function getLedgerSummary(filters = {}) {
   if (filters.export_format) {
     sql += " AND se.export_format = ?";
     params.push(filters.export_format);
+  }
+  if (filters.operator) {
+    sql += " AND (u.username LIKE ? OR u.name LIKE ?)";
+    params.push(`%${filters.operator}%`, `%${filters.operator}%`);
   }
   if (filters.created_by) {
     sql += " AND se.created_by = ?";

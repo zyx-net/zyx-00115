@@ -56,11 +56,18 @@ function switchPage(pageName) {
 
 async function loadPage(name) {
   try {
+    if ((name === 'export-history' || name === 'ledger') && !['admin','lab_manager'].includes(currentUser.role)) {
+      toast('无权访问此页面', 'error');
+      switchPage('dashboard');
+      return;
+    }
     if (name === 'dashboard') await loadDashboard();
     else if (name === 'equipment') await loadEquipment();
     else if (name === 'reservations') await loadReservations();
     else if (name === 'loss-reports') await loadLossReports();
     else if (name === 'settlements') await loadSettlements();
+    else if (name === 'export-history') await loadExportHistory();
+    else if (name === 'ledger') await loadLedger();
     else if (name === 'logs') await loadLogs();
   } catch (e) {
     toast(e.message, 'error');
@@ -285,6 +292,12 @@ async function loadSettlements() {
       </button>
       <button class="btn btn-success" onclick="exportDiffCsv()" style="margin-left:8px" ${compareDisabled ? 'disabled' : ''}>
         📊 导出对比 CSV
+      </button>
+      <button class="btn btn-outline" onclick="switchPage('export-history')" style="margin-left:8px;background:#fff;border:1px solid #3498db;color:#3498db">
+        📤 导出历史
+      </button>
+      <button class="btn btn-outline" onclick="switchPage('ledger')" style="margin-left:8px;background:#fff;border:1px solid #9b59b6;color:#9b59b6">
+        📒 复盘台账
       </button>
       ${selectedSettlementIds.size > 0 ? `<button class="btn btn-sm" style="margin-left:8px;background:#eee;color:#555" onclick="clearSettlementSelection()">取消选择</button>` : ''}
     `;
@@ -743,6 +756,243 @@ async function loadLogs() {
   document.getElementById('logs-table').innerHTML = h;
 }
 
+async function loadExportHistory() {
+  const list = await api('GET', '/api/settlements/exports');
+  const ab = document.getElementById('export-history-actions');
+  ab.innerHTML = `
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <span style="color:#666">仅显示有效导出记录（未失效的结转相关导出）</span>
+      <button class="btn btn-info" onclick="switchPage('ledger')" style="margin-left:auto">📒 进入复盘台账</button>
+    </div>
+  `;
+  
+  if (list.length === 0) {
+    document.getElementById('export-history-list').innerHTML = '<div class="empty-state">暂无导出历史</div>';
+    return;
+  }
+  
+  let h = '<table class="data-table"><thead><tr><th>来源周次</th><th>类型</th><th>文件名</th><th>行数</th><th>操作人</th><th>导出时间</th><th>操作</th></tr></thead><tbody>';
+  list.forEach(item => {
+    const weekDisplay = item.week_key_b ? `${item.week_key_a} ↔ ${item.week_key_b}` : item.week_key_a;
+    const typeLabel = item.type === 'single' ? '单周 JSON' : '对比 CSV';
+    h += `<tr>
+      <td>${weekDisplay}</td>
+      <td>${typeLabel}</td>
+      <td><code style="font-size:12px">${escapeHtml(item.filename)}</code></td>
+      <td>${item.row_count}</td>
+      <td>${escapeHtml(item.created_by_name || '-')}</td>
+      <td class="log-time">${new Date(item.created_at).toLocaleString()}</td>
+      <td>
+        <button class="btn btn-xs btn-info" onclick="showLedgerDetail(${item.id})">查看详情</button>
+      </td>
+    </tr>`;
+  });
+  h += '</tbody></table>';
+  document.getElementById('export-history-list').innerHTML = h;
+}
+
+let ledgerFilters = {
+  week_key_start: '',
+  week_key_end: '',
+  export_type: '',
+  operator: '',
+  invalid: ''
+};
+
+async function loadLedger() {
+  const params = new URLSearchParams();
+  if (ledgerFilters.week_key_start) params.append('week_key_start', ledgerFilters.week_key_start);
+  if (ledgerFilters.week_key_end) params.append('week_key_end', ledgerFilters.week_key_end);
+  if (ledgerFilters.export_type) params.append('export_type', ledgerFilters.export_type);
+  if (ledgerFilters.operator) params.append('operator', ledgerFilters.operator);
+  if (ledgerFilters.invalid !== '') params.append('invalid', ledgerFilters.invalid === 'true');
+  
+  const queryStr = params.toString();
+  const data = await api('GET', `/api/settlements/ledger${queryStr ? '?' + queryStr : ''}`);
+  const { list, summary } = data;
+  
+  const fb = document.getElementById('ledger-filters');
+  fb.innerHTML = `
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <input type="text" id="f-week-start" placeholder="起始周次 (如 2026-W20)" 
+             value="${ledgerFilters.week_key_start}" style="width:140px;padding:6px 8px;border:1px solid #ddd;border-radius:4px">
+      <span>~</span>
+      <input type="text" id="f-week-end" placeholder="结束周次 (如 2026-W30)" 
+             value="${ledgerFilters.week_key_end}" style="width:140px;padding:6px 8px;border:1px solid #ddd;border-radius:4px">
+      <select id="f-type" style="padding:6px 8px;border:1px solid #ddd;border-radius:4px">
+        <option value="">全部类型</option>
+        <option value="single" ${ledgerFilters.export_type === 'single' ? 'selected' : ''}>单周 JSON</option>
+        <option value="comparison" ${ledgerFilters.export_type === 'comparison' ? 'selected' : ''}>对比 CSV</option>
+      </select>
+      <input type="text" id="f-operator" placeholder="操作人 (用户名或姓名)" 
+             value="${ledgerFilters.operator}" style="width:140px;padding:6px 8px;border:1px solid #ddd;border-radius:4px">
+      <select id="f-invalid" style="padding:6px 8px;border:1px solid #ddd;border-radius:4px">
+        <option value="">全部状态</option>
+        <option value="false" ${ledgerFilters.invalid === 'false' ? 'selected' : ''}>有效</option>
+        <option value="true" ${ledgerFilters.invalid === 'true' ? 'selected' : ''}>已失效</option>
+      </select>
+      <button class="btn btn-primary" onclick="applyLedgerFilters()">🔍 筛选</button>
+      <button class="btn" style="background:#eee;color:#555" onclick="resetLedgerFilters()">重置</button>
+      <button class="btn btn-success" onclick="exportLedgerCsv()" style="margin-left:auto">📊 导出台账 CSV</button>
+    </div>
+  `;
+  
+  const sb = document.getElementById('ledger-summary');
+  sb.innerHTML = `
+    <div class="stat-card"><div class="stat-value">${summary.total_count}</div><div class="stat-label">总记录数</div></div>
+    <div class="stat-card"><div class="stat-value">${summary.valid_count}</div><div class="stat-label">有效记录</div></div>
+    <div class="stat-card"><div class="stat-value">${summary.invalid_count}</div><div class="stat-label">已失效</div></div>
+    <div class="stat-card"><div class="stat-value">${summary.single_count}</div><div class="stat-label">单周 JSON</div></div>
+    <div class="stat-card"><div class="stat-value">${summary.comparison_count}</div><div class="stat-label">对比 CSV</div></div>
+    <div class="stat-card"><div class="stat-value">${summary.total_rows || 0}</div><div class="stat-label">总导出行数</div></div>
+  `;
+  
+  if (list.length === 0) {
+    document.getElementById('ledger-list').innerHTML = '<div class="empty-state">暂无台账记录</div>';
+    return;
+  }
+  
+  let h = '<table class="data-table"><thead><tr><th>来源周次</th><th>类型</th><th>文件名</th><th>行数</th><th>关联说明</th><th>状态</th><th>操作人</th><th>导出时间</th><th>操作</th></tr></thead><tbody>';
+  list.forEach(item => {
+    const weekDisplay = item.week_key_b ? `${item.week_key_a} ↔ ${item.week_key_b}` : item.week_key_a;
+    const typeLabel = item.type === 'single' ? '单周 JSON' : '对比 CSV';
+    const statusBadge = item.invalid 
+      ? '<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;background:#fadbd8;color:#c0392b">已失效</span>'
+      : '<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;background:#d5f5e3;color:#1e8449">有效</span>';
+    const stats = item.last_cleaned_stats || {};
+    let cleanedInfo = '';
+    if (item.invalid && stats.cleaned_exports_total) {
+      cleanedInfo = `<br><span style="font-size:11px;color:#999">清理: ${stats.cleaned_notes || 0}说明 / ${stats.cleaned_exports_total}导出</span>`;
+    }
+    h += `<tr style="${item.invalid ? 'opacity:0.6' : ''}">
+      <td>${weekDisplay}</td>
+      <td>${typeLabel}</td>
+      <td><code style="font-size:12px">${escapeHtml(item.filename)}</code></td>
+      <td>${item.row_count}</td>
+      <td>${item.related_note_count || 0} 条${cleanedInfo}</td>
+      <td>${statusBadge}</td>
+      <td>${escapeHtml(item.created_by_user_name || item.created_by_username || '-')}</td>
+      <td class="log-time">${new Date(item.created_at).toLocaleString()}</td>
+      <td>
+        <button class="btn btn-xs btn-info" onclick="showLedgerDetail(${item.id})">详情</button>
+      </td>
+    </tr>`;
+  });
+  h += '</tbody></table>';
+  document.getElementById('ledger-list').innerHTML = h;
+}
+
+function applyLedgerFilters() {
+  ledgerFilters.week_key_start = document.getElementById('f-week-start').value.trim();
+  ledgerFilters.week_key_end = document.getElementById('f-week-end').value.trim();
+  ledgerFilters.export_type = document.getElementById('f-type').value;
+  ledgerFilters.operator = document.getElementById('f-operator').value.trim();
+  ledgerFilters.invalid = document.getElementById('f-invalid').value;
+  loadLedger();
+}
+
+function resetLedgerFilters() {
+  ledgerFilters = {
+    week_key_start: '',
+    week_key_end: '',
+    export_type: '',
+    operator: '',
+    invalid: ''
+  };
+  loadLedger();
+}
+
+async function exportLedgerCsv() {
+  const params = new URLSearchParams();
+  if (ledgerFilters.week_key_start) params.append('week_key_start', ledgerFilters.week_key_start);
+  if (ledgerFilters.week_key_end) params.append('week_key_end', ledgerFilters.week_key_end);
+  if (ledgerFilters.export_type) params.append('export_type', ledgerFilters.export_type);
+  if (ledgerFilters.operator) params.append('operator', ledgerFilters.operator);
+  if (ledgerFilters.invalid !== '') params.append('invalid', ledgerFilters.invalid === 'true');
+  
+  const queryStr = params.toString();
+  try {
+    const res = await fetch(`/api/settlements/ledger/export/csv${queryStr ? '?' + queryStr : ''}`, {
+      credentials: 'include'
+    });
+    if (!res.ok) throw new Error('导出失败');
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const disposition = res.headers.get('Content-Disposition');
+    a.download = disposition && disposition.includes('filename=')
+      ? disposition.split('filename=')[1].replace(/"/g, '')
+      : `settlement-ledger-${new Date().toISOString().slice(0,10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast('台账 CSV 导出成功');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function showLedgerDetail(id) {
+  const detail = await api('GET', `/api/settlements/ledger/${id}`);
+  const weekDisplay = detail.week_key_b ? `${detail.week_key_a} ↔ ${detail.week_key_b}` : detail.week_key_a;
+  const typeLabel = detail.type === 'single' ? '单周 JSON' : '对比 CSV';
+  const statusBadge = detail.invalid 
+    ? '<span style="display:inline-block;padding:4px 12px;border-radius:12px;font-size:12px;background:#fadbd8;color:#c0392b">已失效</span>'
+    : '<span style="display:inline-block;padding:4px 12px;border-radius:12px;font-size:12px;background:#d5f5e3;color:#1e8449">有效</span>';
+  
+  let h = '';
+  h += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">
+    <div style="background:#f8f9fa;padding:12px;border-radius:6px;border:1px solid #e9ecef">
+      <div style="font-size:12px;color:#666;margin-bottom:4px">导出类型</div>
+      <div style="font-weight:bold">${typeLabel} ${statusBadge}</div>
+    </div>
+    <div style="background:#f8f9fa;padding:12px;border-radius:6px;border:1px solid #e9ecef">
+      <div style="font-size:12px;color:#666;margin-bottom:4px">来源周次</div>
+      <div style="font-weight:bold">${weekDisplay}</div>
+    </div>
+  </div>`;
+  
+  h += '<table class="data-table compact" style="margin-bottom:16px"><tbody>';
+  h += `<tr><th style="width:120px">文件名称</th><td><code>${escapeHtml(detail.filename)}</code></td></tr>`;
+  h += `<tr><th>导出行数</th><td>${detail.row_count}</td></tr>`;
+  h += `<tr><th>文件格式</th><td>${detail.export_format || '-'}</td></tr>`;
+  h += `<tr><th>关联说明</th><td>${detail.related_note_count || 0} 条</td></tr>`;
+  h += `<tr><th>操作人</th><td>${escapeHtml(detail.created_by_user_name || detail.created_by_username || '-')} (ID: ${detail.created_by})</td></tr>`;
+  h += `<tr><th>导出时间</th><td>${new Date(detail.created_at).toLocaleString()}</td></tr>`;
+  if (detail.comparison_id) {
+    h += `<tr><th>关联对比</th><td>对比记录 #${detail.comparison_id}</td></tr>`;
+    if (detail.comparison_diff_summary) {
+      const diff = detail.comparison_diff_summary;
+      h += `<tr><th>对比差异</th><td>器材快照: ${diff.equipment_diff || 0}项 | 预约汇总: ${diff.reservation_diff || 0}项 | 损耗汇总: ${diff.loss_diff || 0}项 | 待归还: ${diff.pending_return_diff || 0}项</td></tr>`;
+    }
+  }
+  h += '</tbody></table>';
+  
+  if (detail.invalid) {
+    h += '<div style="background:#fdf2f2;border:1px solid #f5c6c6;border-radius:6px;padding:12px;margin-bottom:16px">';
+    h += '<h4 style="margin-top:0;margin-bottom:8px;color:#c0392b">失效信息</h4>';
+    h += `<p><strong>失效原因:</strong> ${escapeHtml(detail.invalidated_reason || '-')}</p>`;
+    h += `<p><strong>失效操作人:</strong> ${escapeHtml(detail.invalidated_by_user_name || detail.invalidated_by_username || '-')}</p>`;
+    h += `<p><strong>失效时间:</strong> ${detail.invalidated_at ? new Date(detail.invalidated_at).toLocaleString() : '-'}</p>`;
+    if (detail.last_cleaned_stats) {
+      const stats = detail.last_cleaned_stats;
+      h += '<p><strong>清理统计:</strong></p>';
+      h += '<ul style="margin:0;padding-left:20px">';
+      h += `<li>清理说明数: ${stats.cleaned_notes || 0}</li>`;
+      h += `<li>清理对比数: ${stats.cleaned_comparisons || 0}</li>`;
+      h += `<li>清理单周导出数: ${stats.cleaned_exports_single || 0}</li>`;
+      h += `<li>清理对比导出数: ${stats.cleaned_exports_comparison || 0}</li>`;
+      h += `<li>清理总导出数: ${stats.cleaned_exports_total || 0}</li>`;
+      h += '</ul>';
+    }
+    h += '</div>';
+  }
+  
+  showModal(`台账详情 #${detail.id}`, h);
+}
+
 document.getElementById('login-form').onsubmit = async (e) => {
   e.preventDefault();
   const username = document.getElementById('login-username').value;
@@ -791,6 +1041,17 @@ function showMainPage() {
   document.getElementById('login-page').classList.remove('active');
   document.getElementById('main-page').classList.add('active');
   document.getElementById('user-info').innerHTML = `${currentUser.name} <span class="role-badge">${ROLE_MAP[currentUser.role]}</span>`;
+  
+  if (['admin','lab_manager'].includes(currentUser.role)) {
+    document.querySelectorAll('.nav-admin-only').forEach(el => {
+      el.style.display = 'block';
+    });
+  } else {
+    document.querySelectorAll('.nav-admin-only').forEach(el => {
+      el.style.display = 'none';
+    });
+  }
+  
   switchPage('dashboard');
 }
 

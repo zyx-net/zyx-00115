@@ -48,6 +48,8 @@
           <li><a href="#" data-page="reservations" class="nav-link">📋 器材预约</a></li>
           <li><a href="#" data-page="loss-reports" class="nav-link">💥 损耗申报</a></li>
           <li><a href="#" data-page="settlements" class="nav-link">📅 周结转</a></li>
+          <li><a href="#" data-page="export-history" class="nav-link nav-admin-only" style="display:none">📤 导出历史</a></li>
+          <li><a href="#" data-page="ledger" class="nav-link nav-admin-only" style="display:none">📒 复盘台账</a></li>
           <li><a href="#" data-page="logs" class="nav-link">📜 操作日志</a></li>
         </ul>
         <div class="sidebar-footer">
@@ -85,6 +87,19 @@
           <h2>周结转</h2>
           <div id="settlement-actions" class="action-bar"></div>
           <div id="settlement-list"></div>
+        </div>
+
+        <div id="page-export-history" class="content-page">
+          <h2>导出历史</h2>
+          <div id="export-history-actions" class="action-bar"></div>
+          <div id="export-history-list"></div>
+        </div>
+
+        <div id="page-ledger" class="content-page">
+          <h2>复盘台账</h2>
+          <div id="ledger-filters" class="action-bar"></div>
+          <div id="ledger-summary" class="stats-grid" style="margin-bottom:16px"></div>
+          <div id="ledger-list"></div>
         </div>
 
         <div id="page-logs" class="content-page">
