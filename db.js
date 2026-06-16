@@ -20,6 +20,7 @@ async function initDatabase(forceReset) {
   if (!forceReset && fs.existsSync(DB_PATH)) {
     const buffer = fs.readFileSync(DB_PATH);
     db = new SQL.Database(buffer);
+    runMigrations();
   } else {
     db = new SQL.Database();
     createTables();
@@ -27,6 +28,14 @@ async function initDatabase(forceReset) {
     saveToFile();
   }
   return db;
+}
+
+function runMigrations() {
+  const cols = all("PRAGMA table_info(reservations)").map(c => c.name);
+  if (!cols.includes('returned_qty')) {
+    db.run('ALTER TABLE reservations ADD COLUMN returned_qty INTEGER NOT NULL DEFAULT 0');
+    saveToFile();
+  }
 }
 
 function createTables() {
@@ -70,6 +79,7 @@ function createTables() {
       class_id INTEGER NOT NULL REFERENCES classes(id),
       equipment_id INTEGER NOT NULL REFERENCES equipment(id),
       qty INTEGER NOT NULL,
+      returned_qty INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','collected','partially_returned','returned','cancelled')),
       week_key TEXT NOT NULL,
       created_at TEXT NOT NULL,

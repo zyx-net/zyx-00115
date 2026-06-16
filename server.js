@@ -125,14 +125,14 @@ app.post('/api/reservations', requireRole('teacher', 'admin'), (req, res) => {
   const eq = db.get('SELECT * FROM equipment WHERE id = ?', [equipment_id]);
   if (!eq) return res.status(404).json({ error: '器材不存在' });
 
-  if (eq.available_qty - eq.locked_qty < qty) {
+  if (eq.total_qty - eq.locked_qty < qty) {
     db.addLog('reservation_conflict', req.user.id, req.user.name, {
-      equipment_id, requested: qty, available: eq.available_qty - eq.locked_qty
+      equipment_id, requested: qty, available: eq.total_qty - eq.locked_qty
     });
     db.forceSave();
     return res.status(409).json({
-      error: `库存不足：${eq.name} 可用 ${eq.available_qty - eq.locked_qty}，需 ${qty}`,
-      available: eq.available_qty - eq.locked_qty,
+      error: `库存不足：${eq.name} 可用 ${eq.total_qty - eq.locked_qty}，需 ${qty}`,
+      available: eq.total_qty - eq.locked_qty,
       requested: qty
     });
   }
@@ -220,18 +220,20 @@ app.put('/api/reservations/:id/return', requireRole('teacher', 'admin'), (req, r
   }
 
   const now = new Date().toISOString();
-  const newStatus = qty >= maxReturn ? 'returned' : 'partially_returned';
+  const existingReturned = r.returned_qty || 0;
+  const newReturned = existingReturned + qty;
+  const newStatus = newReturned >= maxReturn ? 'returned' : 'partially_returned';
 
   db.run('UPDATE equipment SET available_qty = available_qty + ?, locked_qty = locked_qty - ? WHERE id = ?',
     [qty, qty, r.equipment_id]);
-  db.run('UPDATE reservations SET status = ?, updated_at = ? WHERE id = ?', [newStatus, now, id]);
+  db.run('UPDATE reservations SET status = ?, returned_qty = ?, updated_at = ? WHERE id = ?', [newStatus, newReturned, now, id]);
 
   db.addLog('return_equipment', req.user.id, req.user.name, {
-    reservation_id: id, return_qty: qty, status: newStatus
+    reservation_id: id, return_qty: qty, returned_total: newReturned, status: newStatus
   });
   db.forceSave();
 
-  res.json({ ok: true, status: newStatus, returned: qty });
+  res.json({ ok: true, status: newStatus, returned: qty, returned_qty: newReturned });
 });
 
 app.post('/api/loss-reports', requireRole('teacher', 'admin'), (req, res) => {
@@ -300,6 +302,25 @@ app.put('/api/loss-reports/:id/approve', requireRole('admin', 'lab_manager'), (r
 
   db.run('UPDATE equipment SET total_qty = total_qty - ?, locked_qty = locked_qty - ? WHERE id = ?',
     [report.qty, report.qty, report.equipment_id]);
+
+  const rsv = db.get('SELECT * FROM reservations WHERE id = ?', [report.reservation_id]);
+  if (rsv) {
+    const lossRows = db.all(
+      'SELECT COALESCE(SUM(qty),0) AS total FROM loss_reports WHERE reservation_id = ? AND status = ?',
+      [report.reservation_id, 'approved']
+    );
+    const totalApprovedLoss = lossRows[0] ? lossRows[0].total : 0;
+    const ret = rsv.returned_qty || 0;
+    if (ret + totalApprovedLoss >= rsv.qty) {
+      db.run("UPDATE reservations SET status = 'returned', updated_at = ? WHERE id = ?", [now, report.reservation_id]);
+      db.addLog('resolution_update_status_to_returned', req.user.id, req.user.name, {
+        reservation_id: report.reservation_id,
+        returned_qty: ret,
+        approved_loss: totalApprovedLoss,
+        reservation_qty: rsv.qty
+      });
+    }
+  }
 
   db.addLog('approve_loss_report', req.user.id, req.user.name, {
     report_id: id, equipment_id: report.equipment_id, qty: report.qty
