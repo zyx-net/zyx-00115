@@ -8,6 +8,105 @@ let db = null;
 let dirty = false;
 let saveTimer = null;
 
+const REPAIR_ORDER_STATUSES = {
+  pending: '待处理',
+  reviewing: '审核中',
+  deactivated: '已停用',
+  repairing: '维修中',
+  replacing: '换件中',
+  scrapped: '已报废',
+  returned: '已回库',
+  cancelled: '已取消',
+  revoked: '已撤销'
+};
+
+const REPAIR_ORDER_STATUS_VALUES = Object.keys(REPAIR_ORDER_STATUSES);
+
+const REPAIR_ORDER_ACTIONS = {
+  submit: '提交',
+  review: '审核',
+  deactivate: '停用',
+  repair: '安排维修',
+  replace: '安排换件',
+  scrap: '报废',
+  return: '回库',
+  cancel: '取消',
+  revoke: '撤销',
+  import: '导入'
+};
+
+const REPAIR_ORDER_ACTION_VALUES = Object.keys(REPAIR_ORDER_ACTIONS);
+
+const REPAIR_SCHEDULE_STATUSES = {
+  scheduled: '已排期',
+  picked_up: '已取件',
+  repairing: '维修中',
+  returned: '已归还',
+  cancelled: '已取消'
+};
+
+const REPAIR_SCHEDULE_STATUS_VALUES = Object.keys(REPAIR_SCHEDULE_STATUSES);
+
+const REPAIR_STATUS_FLOW = {
+  pending: ['reviewing', 'cancelled'],
+  reviewing: ['deactivated', 'repairing', 'replacing', 'scrapped', 'cancelled', 'pending'],
+  deactivated: ['repairing', 'replacing', 'scrapped', 'pending', 'reviewing'],
+  repairing: ['returned', 'replacing', 'scrapped', 'deactivated'],
+  replacing: ['returned', 'scrapped', 'deactivated', 'repairing'],
+  scrapped: [],
+  returned: [],
+  cancelled: [],
+  revoked: []
+};
+
+const REPAIR_CSV_FIELDS = [
+  { key: 'order_no', label: '维修单号', required: true },
+  { key: 'status', label: '状态', required: false },
+  { key: 'equipment_id', label: '器材ID', required: false },
+  { key: 'equipment_name', label: '器材名称', required: true },
+  { key: 'qty', label: '数量', required: true },
+  { key: 'course_id', label: '课程ID', required: false },
+  { key: 'course_name', label: '课程名称', required: false },
+  { key: 'class_id', label: '班级ID', required: false },
+  { key: 'class_name', label: '班级名称', required: false },
+  { key: 'fault_phenomenon', label: '故障现象', required: true },
+  { key: 'handling_suggestion', label: '处理建议', required: false },
+  { key: 'decision', label: '处理决定', required: false },
+  { key: 'decision_reason', label: '决定原因', required: false },
+  { key: 'reporter_id', label: '上报人ID', required: false },
+  { key: 'reporter_name', label: '上报人', required: false },
+  { key: 'approver_id', label: '审批人ID', required: false },
+  { key: 'approver_name', label: '审批人', required: false },
+  { key: 'approved_at', label: '审批时间', required: false },
+  { key: 'repair_vendor', label: '维修厂商', required: false },
+  { key: 'repair_cost', label: '维修费用', required: false },
+  { key: 'scheduled_date', label: '排期日期', required: false },
+  { key: 'estimated_return_date', label: '预计归还日期', required: false },
+  { key: 'actual_return_date', label: '实际归还日期', required: false },
+  { key: 'repair_note', label: '维修备注', required: false },
+  { key: 'created_at', label: '创建时间', required: false },
+  { key: 'updated_at', label: '更新时间', required: false }
+];
+
+const REPAIR_ERRORS = {
+  CSV_EMPTY: 'CSV 数据不能为空',
+  CSV_INVALID_FORMAT: 'CSV 格式错误，至少需要标题行和一行数据',
+  CSV_MISSING_REQUIRED: '缺少必填列',
+  CSV_DUPLICATE_ORDER_NO: '单号已存在',
+  CSV_INVALID_STATUS: '无效的状态值',
+  CSV_EQUIPMENT_NOT_FOUND: '找不到器材',
+  CSV_COURSE_NOT_FOUND: '找不到课程',
+  CSV_CLASS_NOT_FOUND: '找不到班级',
+  CSV_INVALID_QTY: '数量必须是正整数',
+  CSV_ROW_ERROR: '行数据错误',
+  ORDER_NOT_FOUND: '维修单不存在',
+  SCHEDULE_NOT_FOUND: '维修排期不存在',
+  INVALID_STATUS_TRANSITION: '状态流转不合法',
+  DUPLICATE_STATUS: '状态未变更',
+  EQUIPMENT_NOT_FOUND: '器材不存在',
+  PERMISSION_DENIED: '权限不足'
+};
+
 function ensureDir() {
   const dir = path.dirname(DB_PATH);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -2188,7 +2287,7 @@ function createRepairOrder(data, reporterId, reporterName) {
     equipment_id, equipment_name: eq.name, qty, fault_phenomenon
   });
 
-  addLog('create_repair_order', reporterId, reporterName, {
+  addLog('repair_create_order', reporterId, reporterName, {
     order_id: orderId, order_no: orderNo, equipment_id, qty
   });
   forceSave();
@@ -2315,21 +2414,23 @@ function getRepairOrdersForTeacher(teacherId) {
   return all(sql, params);
 }
 
-const REPAIR_STATUS_FLOW = {
-  pending: ['reviewing', 'cancelled'],
-  reviewing: ['deactivated', 'repairing', 'replacing', 'scrapped', 'cancelled', 'pending'],
-  deactivated: ['repairing', 'replacing', 'scrapped', 'pending', 'reviewing'],
-  repairing: ['returned', 'replacing', 'scrapped', 'deactivated'],
-  replacing: ['returned', 'scrapped', 'deactivated', 'repairing'],
-  scrapped: [],
-  returned: [],
-  cancelled: [],
-  revoked: []
-};
-
 function canTransitionStatus(fromStatus, toStatus) {
   const allowed = REPAIR_STATUS_FLOW[fromStatus] || [];
   return allowed.includes(toStatus);
+}
+
+function getRepairConstants() {
+  return {
+    order_statuses: REPAIR_ORDER_STATUSES,
+    order_status_values: REPAIR_ORDER_STATUS_VALUES,
+    order_actions: REPAIR_ORDER_ACTIONS,
+    order_action_values: REPAIR_ORDER_ACTION_VALUES,
+    schedule_statuses: REPAIR_SCHEDULE_STATUSES,
+    schedule_status_values: REPAIR_SCHEDULE_STATUS_VALUES,
+    status_flow: REPAIR_STATUS_FLOW,
+    csv_fields: REPAIR_CSV_FIELDS,
+    errors: REPAIR_ERRORS
+  };
 }
 
 function updateRepairStatus(orderId, newStatus, decision, decisionReason, approverId, approverName, action, comment) {
@@ -2533,7 +2634,7 @@ function cancelRepairOrder(orderId, userId, userName, reason) {
     [now, userId, now, orderId]);
 
   addRepairApproval(orderId, 'cancel', userId, userName, reason || '取消维修单', { old_status: order.status });
-  addLog('cancel_repair_order', userId, userName, { order_id: orderId, order_no: order.order_no, reason });
+  addLog('repair_cancel_order', userId, userName, { order_id: orderId, order_no: order.order_no, reason });
   forceSave();
   return { ok: true };
 }
@@ -2564,7 +2665,7 @@ function revokeRepairOrder(orderId, userId, userName, reason) {
     [now, userId, now, orderId]);
 
   addRepairApproval(orderId, 'revoke', userId, userName, reason || '撤销维修单', { old_status: oldStatus });
-  addLog('revoke_repair_order', userId, userName, {
+  addLog('repair_revoke_order', userId, userName, {
     order_id: orderId, order_no: order.order_no, old_status: oldStatus, reason
   });
   forceSave();
@@ -2589,8 +2690,8 @@ function createRepairSchedule(orderId, data, userId, userName) {
       userId, userName, now, now]
   );
 
-  addLog('create_repair_schedule', userId, userName, {
-    schedule_id: scheduleId, order_id: orderId, vendor
+  addLog('repair_create_schedule', userId, userName, {
+    schedule_id: scheduleId, repair_order_id: orderId, vendor
   });
   forceSave();
 
@@ -2622,7 +2723,7 @@ function updateRepairSchedule(scheduleId, data, userId, userName) {
 
   run(`UPDATE repair_schedules SET ${updates.join(', ')} WHERE id = ?`, params);
 
-  addLog('update_repair_schedule', userId, userName, {
+  addLog('repair_update_schedule', userId, userName, {
     schedule_id: scheduleId, updates: data
   });
   forceSave();
@@ -2663,31 +2764,99 @@ function getRepairStats(currentUser) {
   return stats;
 }
 
-function parseRepairCsvRow(row, headers) {
+function parseRepairCsvRow(row, headers, fieldMap) {
   const result = {};
   headers.forEach((h, i) => {
-    result[h.trim()] = row[i] != null ? String(row[i]).trim() : '';
+    const key = fieldMap[h.trim()];
+    if (key) {
+      result[key] = row[i] != null ? String(row[i]).trim() : '';
+    }
   });
   return result;
 }
 
+function buildCsvFieldMap() {
+  const map = {};
+  REPAIR_CSV_FIELDS.forEach(f => {
+    map[f.label] = f.key;
+    map[f.key] = f.key;
+  });
+  return map;
+}
+
+function validateRepairCsvRow(row, rowNum, context) {
+  const errors = [];
+  const { equipmentMap, userMap, courseMap, classMap, existingOrderNos } = context;
+
+  if (row.order_no && existingOrderNos.has(row.order_no)) {
+    return { valid: false, skip: true, reason: REPAIR_ERRORS.CSV_DUPLICATE_ORDER_NO };
+  }
+
+  const requiredFields = REPAIR_CSV_FIELDS.filter(f => f.required).map(f => f.key);
+  for (const field of requiredFields) {
+    if (!row[field] || !String(row[field]).trim()) {
+      const label = REPAIR_CSV_FIELDS.find(f => f.key === field)?.label || field;
+      errors.push(`${label}不能为空`);
+    }
+  }
+
+  let equipmentId = null;
+  if (row.equipment_name) {
+    equipmentId = equipmentMap[row.equipment_name];
+  } else if (row.equipment_id) {
+    equipmentId = parseInt(row.equipment_id);
+    if (isNaN(equipmentId)) equipmentId = null;
+  }
+  if (!equipmentId) {
+    errors.push(REPAIR_ERRORS.CSV_EQUIPMENT_NOT_FOUND + `：${row.equipment_name || row.equipment_id || '空'}`);
+  }
+
+  const qty = parseInt(row.qty);
+  if (!qty || qty <= 0 || isNaN(qty)) {
+    errors.push(REPAIR_ERRORS.CSV_INVALID_QTY);
+  }
+
+  if (row.status && !REPAIR_ORDER_STATUS_VALUES.includes(row.status)) {
+    errors.push(`${REPAIR_ERRORS.CSV_INVALID_STATUS}：${row.status}（有效值：${REPAIR_ORDER_STATUS_VALUES.join('、')}）`);
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    equipmentId,
+    qty
+  };
+}
+
 function importRepairOrders(csvData, userId, userName) {
-  if (!csvData || typeof csvData !== 'string') {
-    return { ok: false, error: 'CSV 数据不能为空' };
+  if (!csvData || typeof csvData !== 'string' || !csvData.trim()) {
+    return { ok: false, error: REPAIR_ERRORS.CSV_EMPTY };
   }
 
   const lines = csvData.split(/\r?\n/).filter(l => l.trim().length > 0);
   if (lines.length < 2) {
-    return { ok: false, error: 'CSV 数据格式错误，至少需要标题行和一行数据' };
+    return { ok: false, error: REPAIR_ERRORS.CSV_INVALID_FORMAT };
   }
 
-  const headers = lines[0].split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map(h => h.replace(/"/g, '').trim());
+  const rawHeaders = lines[0].split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map(h => h.replace(/"/g, '').trim());
+  const fieldMap = buildCsvFieldMap();
+
+  const foundFields = rawHeaders.filter(h => fieldMap[h.trim()]);
+  const requiredLabels = REPAIR_CSV_FIELDS.filter(f => f.required).map(f => f.label);
+  const missingRequired = requiredLabels.filter(l => !foundFields.includes(l) && !foundFields.find(k => fieldMap[k] === REPAIR_CSV_FIELDS.find(f => f.label === l)?.key));
+  
+  if (missingRequired.length > 0) {
+    return { ok: false, error: `${REPAIR_ERRORS.CSV_MISSING_REQUIRED}：${missingRequired.join('、')}` };
+  }
 
   const equipmentMap = {};
   all('SELECT id, name FROM equipment').forEach(e => { equipmentMap[e.name] = e.id; });
 
   const userMap = {};
-  all('SELECT id, username, name FROM users').forEach(u => { userMap[u.username] = u.id; userMap[u.name] = u.id; });
+  all('SELECT id, username, name FROM users').forEach(u => { 
+    userMap[u.username] = u.id; 
+    userMap[u.name] = u.id; 
+  });
 
   const courseMap = {};
   all('SELECT id, name FROM courses').forEach(c => { courseMap[c.name] = c.id; });
@@ -2697,42 +2866,75 @@ function importRepairOrders(csvData, userId, userName) {
 
   const existingOrderNos = new Set(all('SELECT order_no FROM repair_orders').map(r => r.order_no));
 
-  const imported = [];
+  const context = { equipmentMap, userMap, courseMap, classMap, existingOrderNos };
+
+  const validRows = [];
   const skipped = [];
   const errors = [];
 
-  const validStatuses = ['pending', 'reviewing', 'deactivated', 'repairing', 'replacing', 'scrapped', 'returned', 'cancelled', 'revoked'];
-
   for (let i = 1; i < lines.length; i++) {
     const rawRow = lines[i].split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map(cell => cell.replace(/^"|"$/g, '').replace(/""/g, '"'));
-    const row = parseRepairCsvRow(rawRow, headers);
+    const row = parseRepairCsvRow(rawRow, rawHeaders, fieldMap);
+    const rowNum = i + 1;
 
+    const validation = validateRepairCsvRow(row, rowNum, context);
+    
+    if (validation.skip) {
+      skipped.push({ row: rowNum, order_no: row.order_no, reason: validation.reason });
+      continue;
+    }
+
+    if (!validation.valid) {
+      errors.push({ row: rowNum, order_no: row.order_no || '', errors: validation.errors });
+      continue;
+    }
+
+    validRows.push({ row, rowNum, equipmentId: validation.equipmentId, qty: validation.qty });
+  }
+
+  if (errors.length > 0) {
+    return {
+      ok: false,
+      error: `导入失败，共 ${errors.length} 行数据有误`,
+      imported: 0,
+      skipped: skipped.length,
+      errors: errors.length,
+      skipped_items: skipped,
+      error_items: errors
+    };
+  }
+
+  const imported = [];
+  const now = new Date().toISOString();
+
+  for (const { row, rowNum, equipmentId, qty } of validRows) {
     try {
-      if (row['维修单号'] && existingOrderNos.has(row['维修单号'])) {
-        skipped.push({ row: i + 1, order_no: row['维修单号'], reason: '单号已存在' });
-        continue;
-      }
-
-      const equipmentId = row['器材名称'] ? equipmentMap[row['器材名称']] : (row['器材ID'] ? parseInt(row['器材ID']) : null);
-      if (!equipmentId) {
-        errors.push({ row: i + 1, error: `找不到器材：${row['器材名称'] || row['器材ID']}` });
-        continue;
-      }
-
       const eq = get('SELECT * FROM equipment WHERE id = ?', [equipmentId]);
-      const qty = parseInt(row['数量']) || 1;
-      const status = row['状态'] && validStatuses.includes(row['状态']) ? row['状态'] : 'pending';
-
+      
       let reporterId = userId;
-      if (row['上报人']) {
-        reporterId = userMap[row['上报人']] || userId;
+      let reporterName = userName;
+      if (row.reporter_name) {
+        reporterId = userMap[row.reporter_name] || userId;
+        reporterName = row.reporter_name;
+      } else if (row.reporter_id) {
+        reporterId = parseInt(row.reporter_id) || userId;
       }
 
-      let courseId = row['课程名称'] ? courseMap[row['课程名称']] : (row['课程ID'] ? parseInt(row['课程ID']) : null);
-      let classId = row['班级名称'] ? classMap[row['班级名称']] : (row['班级ID'] ? parseInt(row['班级ID']) : null);
+      let courseId = null;
+      if (row.course_name) {
+        courseId = courseMap[row.course_name] || null;
+      } else if (row.course_id) {
+        courseId = parseInt(row.course_id) || null;
+      }
 
-      const now = new Date().toISOString();
-      let orderNo = row['维修单号'];
+      let classId = null;
+      if (row.class_name) {
+        classId = classMap[row.class_name] || null;
+      } else if (row.class_id) {
+        classId = parseInt(row.class_id) || null;
+      }
+
+      let orderNo = row.order_no;
       if (!orderNo) {
         while (true) {
           orderNo = generateRepairOrderNo();
@@ -2740,8 +2942,18 @@ function importRepairOrders(csvData, userId, userName) {
         }
       }
 
-      const createdAt = row['创建时间'] || now;
-      const updatedAt = row['更新时间'] || now;
+      const status = row.status && REPAIR_ORDER_STATUS_VALUES.includes(row.status) ? row.status : 'pending';
+      const createdAt = row.created_at || now;
+      const updatedAt = row.updated_at || now;
+
+      let approverId = null;
+      let approverName = null;
+      if (row.approver_name) {
+        approverId = userMap[row.approver_name] || null;
+        approverName = row.approver_name;
+      } else if (row.approver_id) {
+        approverId = parseInt(row.approver_id) || null;
+      }
 
       const orderId = insertRun(
         `INSERT INTO repair_orders (
@@ -2751,30 +2963,32 @@ function importRepairOrders(csvData, userId, userName) {
           repair_vendor, repair_cost, scheduled_date, estimated_return_date, actual_return_date,
           repair_note, import_source, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [orderNo, courseId || null, classId || null, equipmentId, eq.name, qty,
-          row['故障现象'] || '导入历史数据', row['处理建议'] || null,
-          reporterId, row['上报人'] || userName, status,
-          row['处理决定'] || null, row['决定原因'] || null,
-          row['审批人ID'] ? parseInt(row['审批人ID']) : (row['审批人'] ? userMap[row['审批人']] : null),
-          row['审批人'] || null, row['审批时间'] || null,
-          row['维修厂商'] || null, row['维修费用'] ? parseFloat(row['维修费用']) : null,
-          row['排期日期'] || null, row['预计归还日期'] || null, row['实际归还日期'] || null,
-          row['维修备注'] || null, 'csv_import', createdAt, updatedAt]
+        [orderNo, courseId, classId, equipmentId, eq.name, qty,
+          row.fault_phenomenon || '', row.handling_suggestion || null,
+          reporterId, reporterName, status,
+          row.decision || null, row.decision_reason || null,
+          approverId, approverName, row.approved_at || null,
+          row.repair_vendor || null, row.repair_cost ? parseFloat(row.repair_cost) : null,
+          row.scheduled_date || null, row.estimated_return_date || null, row.actual_return_date || null,
+          row.repair_note || null, 'csv_import', createdAt, updatedAt]
       );
 
       existingOrderNos.add(orderNo);
-      imported.push({ row: i + 1, id: orderId, order_no: orderNo });
+      imported.push({ row: rowNum, id: orderId, order_no: orderNo });
 
       addRepairApproval(orderId, 'import', userId, userName, 'CSV导入历史维修单', {
-        source_row: i + 1, original_status: status
+        source_row: rowNum, original_status: status
       });
     } catch (e) {
-      errors.push({ row: i + 1, error: e.message });
+      errors.push({ row: rowNum, order_no: row.order_no || '', errors: [e.message] });
     }
   }
 
-  addLog('import_repair_orders', userId, userName, {
-    total_rows: lines.length - 1, imported: imported.length, skipped: skipped.length, errors: errors.length
+  addLog('repair_import_orders', userId, userName, {
+    total_rows: lines.length - 1, 
+    imported: imported.length, 
+    skipped: skipped.length, 
+    errors: errors.length
   });
   forceSave();
 
@@ -2790,24 +3004,14 @@ function importRepairOrders(csvData, userId, userName) {
 }
 
 function repairOrdersToCsv(orders) {
-  const headers = ['维修单号', '状态', '器材ID', '器材名称', '数量',
-    '课程ID', '课程名称', '班级ID', '班级名称',
-    '故障现象', '处理建议', '处理决定', '决定原因',
-    '上报人ID', '上报人', '审批人ID', '审批人', '审批时间',
-    '维修厂商', '维修费用', '排期日期', '预计归还日期', '实际归还日期',
-    '维修备注', '创建时间', '更新时间'];
-
+  const headers = REPAIR_CSV_FIELDS.map(f => f.label);
+  const keys = REPAIR_CSV_FIELDS.map(f => f.key);
+  
   const rows = [headers];
 
   orders.forEach(o => {
-    rows.push([
-      o.order_no || '', o.status || '', o.equipment_id || '', o.equipment_name || '', o.qty || '',
-      o.course_id || '', o.course_name || '', o.class_id || '', o.class_name || '',
-      o.fault_phenomenon || '', o.handling_suggestion || '', o.decision || '', o.decision_reason || '',
-      o.reporter_id || '', o.reporter_name || '', o.approver_id || '', o.approver_name || '', o.approved_at || '',
-      o.repair_vendor || '', o.repair_cost || '', o.scheduled_date || '', o.estimated_return_date || '', o.actual_return_date || '',
-      o.repair_note || '', o.created_at || '', o.updated_at || ''
-    ]);
+    const row = keys.map(k => o[k] != null ? o[k] : '');
+    rows.push(row);
   });
 
   return rows.map(r => r.map(cell => {
@@ -2896,5 +3100,6 @@ module.exports = {
   getRepairStats,
   importRepairOrders,
   repairOrdersToCsv,
-  canTransitionStatus
+  canTransitionStatus,
+  getRepairConstants
 };

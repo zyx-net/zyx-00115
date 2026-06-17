@@ -5,8 +5,8 @@ let passed = 0;
 let failed = 0;
 
 function assert(cond, msg) {
-  if (cond) { passed++; console.log(`  ✓ ${msg}`); }
-  else { failed++; console.log(`  ✗ ${msg}`); }
+  if (cond) { passed++; console.log(`  OK: ${msg}`); }
+  else { failed++; console.log(`  FAIL: ${msg}`); }
 }
 
 async function request(method, path, body, cookie) {
@@ -155,14 +155,18 @@ async function run() {
   assert(conflictCheckRes.status === 200, '冲突检查接口可用');
   assert(conflictCheckRes.data.in_transit === true, '正确检测到流转状态');
 
+  await request('PUT', `/api/reservations/${reserveRes.data.id}/return`, { return_qty: 2 }, adminCookie);
+  const noConflictCheck = await request('GET', '/api/repair/check-conflict/2', null, adminCookie);
+  assert(noConflictCheck.data.in_transit === false, '归还后流转状态清除');
+
   const batchRes = await request('POST', '/api/inventory/batches', { semester: '2025-2026-2', lab_name: '物理实验室' }, adminCookie);
   await request('PUT', `/api/inventory/batches/${batchRes.data.id}/lock`, {}, adminCookie);
   const conflictCheckInventory = await request('GET', '/api/repair/check-conflict/1', null, adminCookie);
   assert(conflictCheckInventory.data.in_transit === true, '盘点中的器材也被检测为流转态');
 
-  await request('PUT', `/api/reservations/${reserveRes.data.id}/return`, { return_qty: 2 }, adminCookie);
-  const noConflictCheck = await request('GET', '/api/repair/check-conflict/2', null, adminCookie);
-  assert(noConflictCheck.data.in_transit === false, '归还后流转状态清除');
+  await request('PUT', `/api/inventory/batches/${batchRes.data.id}/cancel`, {}, adminCookie);
+  const noConflictAfterCancel = await request('GET', '/api/repair/check-conflict/1', null, adminCookie);
+  assert(noConflictAfterCancel.data.in_transit === false, '取消盘点后流转状态清除');
 
   console.log('\n--- 6. 完整维修流程（停用→送修→回库）---');
   const deactivateRes = await request('PUT', `/api/repair/orders/${teacherOrderId}/deactivate`, {
@@ -406,7 +410,7 @@ async function run() {
   const logActions = [...new Set(repairLogs.map(l => l.action))];
   console.log(`  维修相关日志类型: ${logActions.join(', ')}`);
 
-  const createLog = repairLogs.find(l => l.action === 'create_repair_order');
+  const createLog = repairLogs.find(l => l.action === 'repair_create_order');
   assert(createLog, '创建维修单有日志');
 
   console.log('\n=== 测试结果 ===');

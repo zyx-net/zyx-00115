@@ -29,6 +29,20 @@ const REPAIR_DECISION_MAP = {
   deactivate: '立即停用', repair: '安排维修', replace: '安排换件',
   scrap: '报废', cancel: '取消', pending: '待决定'
 };
+const REPAIR_SCHEDULE_STATUS_MAP = {
+  scheduled: '已排期',
+  picked_up: '已取件',
+  repairing: '维修中',
+  returned: '已归还',
+  cancelled: '已取消'
+};
+const REPAIR_SCHEDULE_STATUS_CLASS = {
+  scheduled: 'status-pending',
+  picked_up: 'status-partial',
+  repairing: 'status-approved',
+  returned: 'status-returned',
+  cancelled: 'status-cancelled'
+};
 
 async function api(method, url, body) {
   const opts = { method, headers: { 'Content-Type': 'application/json' }, credentials: 'include' };
@@ -2331,7 +2345,7 @@ async function loadRepairSchedules() {
       <td>${escapeHtml(s.vendor||'')}</td>
       <td>${s.scheduled_date||''}</td>
       <td>${s.estimated_cost?'¥'+s.estimated_cost:''}</td>
-      <td>${s.status||'待安排'}</td>
+      <td><span class="status-badge ${REPAIR_SCHEDULE_STATUS_CLASS[s.status]||''}">${REPAIR_SCHEDULE_STATUS_MAP[s.status]||s.status||'待安排'}</span></td>
       <td class="action-cell">
         <button class="btn btn-sm btn-info" onclick="showEditScheduleModal(${s.id})">编辑</button>
       </td>
@@ -2376,11 +2390,10 @@ async function showEditScheduleModal(id) {
     <div class="form-group"><label>计划维修日期</label><input type="date" name="scheduled_date" value="${s.scheduled_date||''}"></div>
     <div class="form-group"><label>预估费用 (元)</label><input type="number" name="estimated_cost" min="0" step="0.01" value="${s.estimated_cost||''}"></div>
     <div class="form-group"><label>实际费用 (元)</label><input type="number" name="actual_cost" min="0" step="0.01" value="${s.actual_cost||''}"></div>
+    <div class="form-group"><label>取件日期</label><input type="date" name="pickup_date" value="${s.pickup_date||''}"></div>
+    <div class="form-group"><label>归还日期</label><input type="date" name="return_date" value="${s.return_date||''}"></div>
     <div class="form-group"><label>状态</label><select name="status">
-      <option value="scheduled" ${s.status==='scheduled'?'selected':''}>已排期</option>
-      <option value="in_progress" ${s.status==='in_progress'?'selected':''}>维修中</option>
-      <option value="completed" ${s.status==='completed'?'selected':''}>已完成</option>
-      <option value="cancelled" ${s.status==='cancelled'?'selected':''}>已取消</option>
+      ${Object.entries(REPAIR_SCHEDULE_STATUS_MAP).map(([k,v]) => `<option value="${k}" ${s.status===k?'selected':''}>${v}</option>`).join('')}
     </select></div>
     <div class="form-group"><label>备注</label><textarea name="notes" rows="2">${escapeHtml(s.notes||'')}</textarea></div>
     <button type="submit" class="btn btn-primary btn-block">保存修改</button>
@@ -2409,10 +2422,10 @@ function loadRepairImportExport() {
   let h = '';
   h += '<div class="card" style="margin-bottom:16px">';
   h += '<h4 style="margin:0 0 12px 0">CSV 导入说明</h4>';
-  h += '<p style="color:#666;margin:4px 0">CSV 文件需包含以下列：<b>order_no, course_id, equipment_id, qty, fault_phenomenon, handling_suggestion, status, decision, repair_vendor, repair_cost, created_at</b></p>';
-  h += '<p style="color:#666;margin:4px 0">必填列：order_no, course_id, equipment_id, qty, fault_phenomenon, status</p>';
-  h += '<p style="color:#666;margin:4px 0">状态可选值：pending, reviewing, deactivated, repairing, replacing, returned, scrapped, cancelled, revoked</p>';
-  h += '<p style="color:#d9534f;margin:4px 0">⚠️ 重复单号、状态倒退、权限越界都会被拦截并给出详细反馈</p>';
+  h += '<p style="color:#666;margin:4px 0">必填列：<b>器材名称、数量、故障现象</b>（维修单号留空将自动生成）</p>';
+  h += '<p style="color:#666;margin:4px 0">支持中文字段名：维修单号、状态、器材ID、器材名称、数量、课程ID、课程名称、班级ID、班级名称、故障现象、处理建议、处理决定、决定原因、上报人ID、上报人、审批人ID、审批人、审批时间、维修厂商、维修费用、排期日期、预计归还日期、实际归还日期、维修备注、创建时间、更新时间</p>';
+  h += '<p style="color:#666;margin:4px 0">状态可选值：pending(待处理)、reviewing(审核中)、deactivated(已停用)、repairing(维修中)、replacing(换件中)、returned(已回库)、scrapped(已报废)、cancelled(已取消)、revoked(已撤销)</p>';
+  h += '<p style="color:#d9534f;margin:4px 0">⚠️ 所有行校验通过后才会写入数据库，任何一行错误都会导致整体导入失败，不会写脏数据</p>';
   h += '</div>';
 
   h += '<div class="card">';
@@ -2443,26 +2456,33 @@ async function importRepairCsv(event) {
 
   try {
     const text = await file.text();
-    const r = await api('POST', '/api/repair/import/csv', { csvData: text });
+    const r = await api('POST', '/api/repair/import/csv', { csv_data: text });
 
     let h = '<div style="margin-bottom:12px">';
-    h += `<p><b>导入结果：</b>成功 ${r.success} 条，跳过 ${r.skipped} 条，失败 ${r.failed} 条</p>`;
-    if (r.errors && r.errors.length) {
+    h += `<p><b>导入结果：</b>成功 ${r.imported} 条，跳过 ${r.skipped} 条，失败 ${r.errors} 条</p>`;
+    
+    if (r.error_items && r.error_items.length) {
       h += '<div style="background:#ffebee;padding:8px;border-radius:4px;margin:8px 0;max-height:200px;overflow-y:auto">';
       h += '<b style="color:#c62828">错误详情：</b><ul style="margin:4px 0;padding-left:20px">';
-      r.errors.forEach(err => { h += `<li style="color:#c62828">${escapeHtml(err)}</li>`; });
+      r.error_items.forEach(item => { 
+        const errMsgs = Array.isArray(item.errors) ? item.errors.join('；') : (item.error || '未知错误');
+        h += `<li style="color:#c62828">第 ${item.row} 行${item.order_no?`（${item.order_no}）`:''}：${escapeHtml(errMsgs)}</li>`; 
+      });
       h += '</ul></div>';
     }
-    if (r.warnings && r.warnings.length) {
+    
+    if (r.skipped_items && r.skipped_items.length) {
       h += '<div style="background:#fff8e1;padding:8px;border-radius:4px;margin:8px 0;max-height:200px;overflow-y:auto">';
-      h += '<b style="color:#f57f17">警告信息：</b><ul style="margin:4px 0;padding-left:20px">';
-      r.warnings.forEach(w => { h += `<li style="color:#f57f17">${escapeHtml(w)}</li>`; });
+      h += '<b style="color:#f57f17">跳过项：</b><ul style="margin:4px 0;padding-left:20px">';
+      r.skipped_items.forEach(item => { 
+        h += `<li style="color:#f57f17">第 ${item.row} 行${item.order_no?`（${item.order_no}）`:''}：${escapeHtml(item.reason || '跳过')}</li>`; 
+      });
       h += '</ul></div>';
     }
     h += '</div>';
 
     document.getElementById('repair-import-result').innerHTML = h;
-    if (r.success > 0) {
+    if (r.imported > 0) {
       loadRepairList();
       loadRepairStats();
     }
@@ -2493,7 +2513,7 @@ async function loadRepairApprovals() {
 
   let h = '<table class="data-table"><thead><tr><th>时间</th><th>维修单号</th><th>器材</th><th>动作</th><th>操作人</th><th>备注</th></tr></thead><tbody>';
   const actMap = {
-    create: '创建', review: '审核', deactivate: '停用', repair: '安排维修',
+    submit: '提交', review: '审核', deactivate: '停用', repair: '安排维修',
     replace: '安排换件', scrap: '报废', return: '回库', cancel: '取消',
     revoke: '撤销', schedule: '排期', import: '导入'
   };

@@ -2149,6 +2149,10 @@ app.get('/api/repair/stats', requireAuth, (req, res) => {
   res.json(stats);
 });
 
+app.get('/api/repair/constants', requireAuth, (req, res) => {
+  res.json(db.getRepairConstants());
+});
+
 app.post('/api/repair/schedules', requireRole('admin', 'lab_manager'), (req, res) => {
   const { repair_order_id, vendor, contact_person, contact_phone, scheduled_date, estimated_cost, notes } = req.body;
   if (!repair_order_id) return res.status(400).json({ error: '缺少维修单ID' });
@@ -2178,19 +2182,25 @@ app.put('/api/repair/schedules/:id', requireRole('admin', 'lab_manager'), (req, 
 
 app.post('/api/repair/import/csv', requireRole('admin', 'lab_manager'), (req, res) => {
   const { csv_data } = req.body;
-  if (!csv_data) return res.status(400).json({ error: '缺少 CSV 数据' });
+  if (!csv_data) return res.status(400).json({ error: '缺少 CSV 数据', imported: 0, skipped: 0, errors: 0, error_items: [], skipped_items: [] });
 
   const result = db.importRepairOrders(csv_data, req.user.id, req.user.name);
-  if (!result.ok) return res.status(400).json({ error: result.error });
+  
+  const response = {
+    imported: result.imported || 0,
+    skipped: result.skipped || 0,
+    errors: result.errors || 0,
+    imported_items: result.imported_items || [],
+    skipped_items: result.skipped_items || [],
+    error_items: result.error_items || []
+  };
+  
+  if (!result.ok) {
+    response.error = result.error;
+    return res.status(400).json(response);
+  }
 
-  res.json({
-    imported: result.imported,
-    skipped: result.skipped,
-    errors: result.errors,
-    imported_items: result.imported_items,
-    skipped_items: result.skipped_items,
-    error_items: result.error_items
-  });
+  res.json(response);
 });
 
 app.get('/api/repair/export/csv', requireRole('admin', 'lab_manager'), (req, res) => {
