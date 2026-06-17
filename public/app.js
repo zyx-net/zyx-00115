@@ -67,6 +67,7 @@ async function loadPage(name) {
     else if (name === 'loss-reports') await loadLossReports();
     else if (name === 'settlements') await loadSettlements();
     else if (name === 'makeup-center') await loadMakeupCenter();
+    else if (name === 'inventory-center') await loadInventoryCenter();
     else if (name === 'export-history') await loadExportHistory();
     else if (name === 'ledger') await loadLedger();
     else if (name === 'logs') await loadLogs();
@@ -992,6 +993,322 @@ async function showLedgerDetail(id) {
   }
   
   showModal(`台账详情 #${detail.id}`, h);
+}
+
+const INV_STATUS_MAP = {
+  draft: '草稿', locked: '已锁定', counting: '盘点中',
+  diff_confirmed: '差异已确认', correcting: '纠偏中', completed: '已完成', cancelled: '已取消'
+};
+const INV_STATUS_CLASS = {
+  draft: 'status-pending', locked: 'status-approved', counting: 'status-collected',
+  diff_confirmed: 'status-partial', correcting: 'status-pending', completed: 'status-returned', cancelled: 'status-cancelled'
+};
+const INV_ITEM_STATUS_MAP = {
+  pending: '待盘点', counted: '已盘点', diff_confirmed: '差异已确认',
+  corrected: '已纠偏', conflict_blocked: '冲突拦截'
+};
+const INV_ITEM_STATUS_CLASS = {
+  pending: 'status-pending', counted: 'status-approved', diff_confirmed: 'status-partial',
+  corrected: 'status-returned', conflict_blocked: 'status-rejected'
+};
+
+async function loadInventoryCenter() {
+  const isAdmin = ['admin', 'lab_manager'].includes(currentUser.role);
+  const ab = document.getElementById('inventory-actions');
+  if (isAdmin) {
+    ab.innerHTML = `
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn btn-primary" onclick="showCreateInventoryBatchModal()">➕ 发起盘点批次</button>
+        <select id="inv-filter-status" style="padding:6px 8px;border:1px solid #ddd;border-radius:4px" onchange="loadInventoryList()">
+          <option value="">全部状态</option>
+          ${Object.entries(INV_STATUS_MAP).map(([k,v]) => `<option value="${k}">${v}</option>`).join('')}
+        </select>
+        <input type="text" id="inv-filter-semester" placeholder="学期 (如 2025-2026-2)" style="padding:6px 8px;border:1px solid #ddd;border-radius:4px;width:160px" onchange="loadInventoryList()">
+        <button class="btn" style="background:#eee;color:#555" onclick="document.getElementById('inv-filter-status').value='';document.getElementById('inv-filter-semester').value='';loadInventoryList()">重置</button>
+      </div>
+    `;
+  } else {
+    ab.innerHTML = '<p style="color:#666">您可查看与您课程相关的盘点结果，但不能修改数据。</p>';
+  }
+  await loadInventoryList();
+}
+
+async function loadInventoryList() {
+  const isAdmin = ['admin', 'lab_manager'].includes(currentUser.role);
+  const params = new URLSearchParams();
+  const status = document.getElementById('inv-filter-status')?.value;
+  const semester = document.getElementById('inv-filter-semester')?.value;
+  if (status) params.append('status', status);
+  if (semester) params.append('semester', semester);
+  const q = params.toString();
+
+  if (!isAdmin) {
+    try {
+      const items = await api('GET', '/api/inventory/teacher-items');
+      if (items.length === 0) {
+        document.getElementById('inventory-list').innerHTML = '<div class="empty-state">暂无与您课程相关的盘点结果</div>';
+        return;
+      }
+      let h = '<table class="data-table"><thead><tr><th>批次号</th><th>学期</th><th>器材</th><th>账面数量</th><th>实盘数量</th><th>差异</th><th>状态</th></tr></thead><tbody>';
+      items.forEach(i => {
+        h += `<tr>
+          <td>${escapeHtml(i.batch_no)}</td>
+          <td>${escapeHtml(i.semester)}</td>
+          <td>${escapeHtml(i.equipment_name)}</td>
+          <td>${i.book_qty}</td>
+          <td>${i.actual_qty != null ? i.actual_qty : '-'}</td>
+          <td style="color:${i.diff_qty > 0 ? '#27ae60' : (i.diff_qty < 0 ? '#e74c3c' : '#7f8c8d')}">${i.diff_qty != null ? (i.diff_qty > 0 ? '+' : '') + i.diff_qty : '-'}</td>
+          <td><span class="status-badge ${INV_ITEM_STATUS_CLASS[i.status] || ''}">${INV_ITEM_STATUS_MAP[i.status] || i.status}</span></td>
+        </tr>`;
+      });
+      h += '</tbody></table>';
+      document.getElementById('inventory-list').innerHTML = h;
+    } catch (e) { toast(e.message, 'error'); }
+    return;
+  }
+
+  try {
+    const list = await api('GET', `/api/inventory/batches${q ? '?' + q : ''}`);
+    if (list.length === 0) {
+      document.getElementById('inventory-list').innerHTML = '<div class="empty-state">暂无盘点批次</div>';
+      return;
+    }
+    let h = '<table class="data-table"><thead><tr><th>批次号</th><th>学期</th><th>实验室</th><th>状态</th><th>创建人</th><th>创建时间</th><th>操作</th></tr></thead><tbody>';
+    list.forEach(b => {
+      h += `<tr>
+        <td><a href="#" onclick="showInventoryBatchDetail(${b.id});return false">${escapeHtml(b.batch_no)}</a></td>
+        <td>${escapeHtml(b.semester)}</td>
+        <td>${escapeHtml(b.lab_name || '-')}</td>
+        <td><span class="status-badge ${INV_STATUS_CLASS[b.status] || ''}">${INV_STATUS_MAP[b.status] || b.status}</span></td>
+        <td>${escapeHtml(b.created_by_name || '-')}</td>
+        <td class="log-time">${new Date(b.created_at).toLocaleString()}</td>
+        <td class="action-cell">
+          <button class="btn btn-xs btn-info" onclick="showInventoryBatchDetail(${b.id})">详情</button>
+        </td>
+      </tr>`;
+    });
+    h += '</tbody></table>';
+    document.getElementById('inventory-list').innerHTML = h;
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+function showCreateInventoryBatchModal() {
+  let h = `<form id="inv-create-form">
+    <div class="form-group"><label>学期 *</label><input type="text" id="inv-semester" value="2025-2026-2" required placeholder="如 2025-2026-2"></div>
+    <div class="form-group"><label>实验室（可选）</label><input type="text" id="inv-lab-name" placeholder="如 物理实验室A101"></div>
+    <p class="form-hint">发起后将自动创建盘点批次并包含当前所有器材。需锁定后才能录入实盘数量。</p>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button type="submit" class="btn btn-primary" style="flex:1">创建批次</button>
+      <button type="button" class="btn" style="flex:1;background:#eee;color:#555" onclick="closeModal()">取消</button>
+    </div>
+  </form>`;
+  showModal('发起盘点批次', h);
+  document.getElementById('inv-create-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const semester = document.getElementById('inv-semester').value.trim();
+    const labName = document.getElementById('inv-lab-name').value.trim();
+    try {
+      const batch = await api('POST', '/api/inventory/batches', { semester, lab_name: labName || null });
+      closeModal();
+      toast(`盘点批次 ${batch.batch_no} 已创建`);
+      loadInventoryCenter();
+    } catch (err) { toast(err.message, 'error'); }
+  };
+}
+
+async function showInventoryBatchDetail(batchId) {
+  try {
+    const batch = await api('GET', `/api/inventory/batches/${batchId}`);
+    const isAdmin = ['admin', 'lab_manager'].includes(currentUser.role);
+    const isReadonly = !isAdmin;
+
+    let h = '';
+    h += `<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px">
+      <div style="background:#f8f9fa;padding:12px;border-radius:6px;border:1px solid #e9ecef">
+        <div style="font-size:12px;color:#666;margin-bottom:4px">批次号 / 学期</div>
+        <div style="font-weight:bold">${escapeHtml(batch.batch_no)} / ${escapeHtml(batch.semester)}</div>
+      </div>
+      <div style="background:#f8f9fa;padding:12px;border-radius:6px;border:1px solid #e9ecef">
+        <div style="font-size:12px;color:#666;margin-bottom:4px">实验室 / 状态</div>
+        <div style="font-weight:bold">${escapeHtml(batch.lab_name || '全部')} <span class="status-badge ${INV_STATUS_CLASS[batch.status] || ''}">${INV_STATUS_MAP[batch.status] || batch.status}</span></div>
+      </div>
+      <div style="background:#f8f9fa;padding:12px;border-radius:6px;border:1px solid #e9ecef">
+        <div style="font-size:12px;color:#666;margin-bottom:4px">创建人 / 时间</div>
+        <div style="font-weight:bold">${escapeHtml(batch.created_by_name || '-')} · ${new Date(batch.created_at).toLocaleString()}</div>
+      </div>
+    </div>`;
+
+    if (batch.items && batch.items.length > 0) {
+      h += '<table class="data-table compact"><thead><tr><th>器材</th><th>账面</th><th>实盘</th><th>已预约未领</th><th>待归还</th><th>已审批损耗</th><th>差异</th><th>状态</th>';
+      if (isAdmin) h += '<th>操作</th>';
+      h += '</tr></thead><tbody>';
+      batch.items.forEach(item => {
+        const diffColor = item.diff_qty > 0 ? '#27ae60' : (item.diff_qty < 0 ? '#e74c3c' : '#7f8c8d');
+        const diffText = item.diff_qty != null ? (item.diff_qty > 0 ? '+' : '') + item.diff_qty : '-';
+        h += `<tr style="${item.status === 'conflict_blocked' ? 'background:#fef9e7' : ''}">
+          <td>${escapeHtml(item.equipment_name)}</td>
+          <td>${item.book_qty}</td>
+          <td>${item.actual_qty != null ? item.actual_qty : '-'}</td>
+          <td>${item.pending_reserve_qty}</td>
+          <td>${item.pending_return_qty}</td>
+          <td>${item.approved_loss_qty}</td>
+          <td style="color:${diffColor};font-weight:bold">${diffText}</td>
+          <td><span class="status-badge ${INV_ITEM_STATUS_CLASS[item.status] || ''}">${INV_ITEM_STATUS_MAP[item.status] || item.status}</span></td>`;
+        if (isAdmin) {
+          h += '<td class="action-cell">';
+          if (['locked', 'counting'].includes(batch.status) && item.actual_qty == null) {
+            h += `<button class="btn btn-xs btn-info" onclick="showRecordItemModal(${batchId}, ${item.id}, '${escapeHtml(item.equipment_name)}', ${item.book_qty})">录入</button>`;
+          }
+          if (item.status === 'conflict_blocked') {
+            const ci = item.conflict_info ? JSON.parse(item.conflict_info) : null;
+            h += `<span style="color:#e74c3c;font-size:12px" title="${ci ? ci.reason : '冲突'}">⚠️冲突</span>`;
+          }
+          if (['diff_confirmed', 'correcting'].includes(batch.status) && item.diff_qty !== 0 && item.status !== 'corrected' && item.status !== 'conflict_blocked') {
+            h += `<button class="btn btn-xs btn-success" onclick="doCorrectItem(${batchId}, ${item.id})">纠偏</button>`;
+          }
+          if (['diff_confirmed', 'correcting'].includes(batch.status) && item.status === 'conflict_blocked') {
+            h += `<button class="btn btn-xs btn-warning" onclick="doResolveConflict(${batchId}, ${item.id})">解决冲突</button>`;
+          }
+          h += '</td>';
+        }
+      });
+      h += '</tbody></table>';
+    }
+
+    if (isAdmin) {
+      h += '<div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap">';
+      if (batch.status === 'draft') {
+        h += `<button class="btn btn-primary" onclick="doLockBatch(${batchId})">🔒 锁定盘点范围</button>`;
+        h += `<button class="btn btn-danger" onclick="doCancelBatch(${batchId})">取消批次</button>`;
+      }
+      if (['locked', 'counting'].includes(batch.status)) {
+        const allRecorded = batch.items.every(i => i.actual_qty != null);
+        if (allRecorded) {
+          h += `<button class="btn btn-warning" onclick="doCalculateDiff(${batchId})">📊 计算差异</button>`;
+        } else {
+          h += `<span style="color:#999;padding:6px 12px">请先录入所有器材的实盘数量</span>`;
+        }
+        h += `<button class="btn btn-danger" onclick="doCancelBatch(${batchId})">取消批次</button>`;
+      }
+      if (batch.status === 'counting') {
+        h += `<button class="btn btn-warning" onclick="doCalculateDiff(${batchId})">📊 计算差异</button>`;
+      }
+      if (batch.status === 'diff_confirmed') {
+        const hasConflicts = batch.items.some(i => i.status === 'conflict_blocked');
+        if (hasConflicts) {
+          h += `<span style="color:#e74c3c;padding:6px 12px">⚠️ 存在冲突项，请先解决冲突再批量纠偏</span>`;
+        } else {
+          h += `<button class="btn btn-success" onclick="doCorrectAll(${batchId})">✅ 批量纠偏</button>`;
+        }
+      }
+      if (batch.status === 'correcting') {
+        const remaining = batch.items.filter(i => i.diff_qty !== 0 && i.status !== 'corrected' && i.status !== 'conflict_blocked');
+        if (remaining.length > 0) {
+          h += `<button class="btn btn-success" onclick="doCorrectAll(${batchId})">✅ 继续批量纠偏</button>`;
+        }
+      }
+      h += `<a href="/api/inventory/batches/${batchId}/export-csv" class="btn btn-info" target="_blank">📥 导出CSV</a>`;
+      h += `<button class="btn btn-secondary" onclick="closeModal()">关闭</button>`;
+      h += '</div>';
+    }
+
+    showModal(`盘点批次 · ${batch.batch_no}`, h);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+function showRecordItemModal(batchId, itemId, eqName, bookQty) {
+  let h = `<form id="inv-record-form">
+    <div class="form-group"><label>器材: <strong>${eqName}</strong> (账面: ${bookQty})</label></div>
+    <div class="form-group"><label>实盘数量 *</label><input type="number" id="inv-actual-qty" min="0" value="${bookQty}" required></div>
+    <div class="form-group"><label>缺失原因</label><input type="text" id="inv-missing-reason" placeholder="如有差异请说明原因"></div>
+    <div class="form-group"><label>备注</label><input type="text" id="inv-notes" placeholder="其他备注"></div>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button type="submit" class="btn btn-primary" style="flex:1">确认录入</button>
+      <button type="button" class="btn" style="flex:1;background:#eee;color:#555" onclick="closeModal()">取消</button>
+    </div>
+  </form>`;
+  showModal('录入实盘数量', h);
+  document.getElementById('inv-record-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const actualQty = parseInt(document.getElementById('inv-actual-qty').value);
+    const missingReason = document.getElementById('inv-missing-reason').value.trim();
+    const notes = document.getElementById('inv-notes').value.trim();
+    try {
+      await api('PUT', `/api/inventory/batches/${batchId}/record`, {
+        item_id: itemId, actual_qty: actualQty, missing_reason: missingReason || null, notes: notes || null
+      });
+      closeModal();
+      toast('实盘数据已录入');
+      showInventoryBatchDetail(batchId);
+    } catch (err) { toast(err.message, 'error'); }
+  };
+}
+
+async function doLockBatch(batchId) {
+  if (!confirm('确认锁定盘点范围？锁定后批次将进入盘点状态。')) return;
+  try {
+    await api('PUT', `/api/inventory/batches/${batchId}/lock`);
+    toast('盘点范围已锁定');
+    showInventoryBatchDetail(batchId);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function doCalculateDiff(batchId) {
+  try {
+    const result = await api('POST', `/api/inventory/batches/${batchId}/calculate-diff`);
+    if (result.conflicts && result.conflicts.length > 0) {
+      toast(`差异计算完成，发现 ${result.conflicts.length} 项冲突需要处理`, 'warn');
+    } else {
+      toast(`差异计算完成，共 ${result.diff_items} 项有差异`);
+    }
+    showInventoryBatchDetail(batchId);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function doConfirmDiff(batchId) {
+  if (!confirm('确认差异？确认后将进入纠偏阶段。')) return;
+  try {
+    await api('PUT', `/api/inventory/batches/${batchId}/confirm-diff`);
+    toast('差异已确认');
+    showInventoryBatchDetail(batchId);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function doCorrectItem(batchId, itemId) {
+  if (!confirm('确认对该器材执行库存纠偏？')) return;
+  try {
+    const r = await api('PUT', `/api/inventory/batches/${batchId}/correct-item/${itemId}`);
+    toast(`纠偏完成: ${r.old_total} → ${r.new_total} (差异 ${r.diff_qty > 0 ? '+' : ''}${r.diff_qty})`);
+    showInventoryBatchDetail(batchId);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function doResolveConflict(batchId, itemId) {
+  if (!confirm('确认解决冲突并执行纠偏？仅当流转中的器材已归还/领用后才可执行。')) return;
+  try {
+    const r = await api('PUT', `/api/inventory/batches/${batchId}/resolve-conflict/${itemId}`);
+    toast(`冲突已解决并纠偏: ${r.old_total} → ${r.new_total}`);
+    showInventoryBatchDetail(batchId);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function doCorrectAll(batchId) {
+  if (!confirm('确认批量纠偏所有有差异且无冲突的器材？此操作将直接修改库存数量。')) return;
+  try {
+    const r = await api('PUT', `/api/inventory/batches/${batchId}/correct-all`);
+    toast(`批量纠偏完成: 成功 ${r.corrected} 项, 失败 ${r.failed} 项`);
+    showInventoryBatchDetail(batchId);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function doCancelBatch(batchId) {
+  if (!confirm('确认取消此盘点批次？')) return;
+  try {
+    await api('PUT', `/api/inventory/batches/${batchId}/cancel`);
+    toast('批次已取消');
+    closeModal();
+    loadInventoryCenter();
+  } catch (e) { toast(e.message, 'error'); }
 }
 
 document.getElementById('login-form').onsubmit = async (e) => {

@@ -1763,6 +1763,243 @@ app.get('/api/makeup/logs', requireAuth, (req, res) => {
   res.json(list);
 });
 
+app.post('/api/inventory/batches', requireRole('admin', 'lab_manager'), (req, res) => {
+  const { semester, lab_name } = req.body;
+  if (!semester) return res.status(400).json({ error: '缺少学期信息' });
+  try {
+    const batch = db.createInventoryBatch(semester, lab_name, req.user.id, req.user.name);
+    db.forceSave();
+    res.status(201).json(batch);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/inventory/batches', requireAuth, (req, res) => {
+  const filters = {
+    semester: req.query.semester,
+    status: req.query.status,
+    lab_name: req.query.lab_name
+  };
+  const list = db.getInventoryBatches(filters, req.user);
+  res.json(list);
+});
+
+app.get('/api/inventory/batches/:id', requireAuth, (req, res) => {
+  const id = parseInt(req.params.id);
+  const batch = db.getInventoryBatchById(id);
+  if (!batch) return res.status(404).json({ error: '盘点批次不存在' });
+  if (req.user.role === 'teacher') {
+    const items = db.getInventoryItemsForTeacher(req.user.id);
+    const allowedEqIds = items.map(i => i.equipment_id);
+    batch.items = batch.items.filter(i => allowedEqIds.includes(i.equipment_id));
+    batch.items.forEach(i => { i._readonly = true; });
+  }
+  res.json(batch);
+});
+
+app.put('/api/inventory/batches/:id/lock', requireRole('admin', 'lab_manager'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const result = db.lockInventoryBatch(id, req.user.id, req.user.name);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  db.forceSave();
+  res.json({ ok: true });
+});
+
+app.put('/api/inventory/batches/:id/record', requireRole('admin', 'lab_manager'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const { item_id, actual_qty, missing_reason, notes } = req.body;
+  if (!item_id || actual_qty == null) return res.status(400).json({ error: '缺少盘点明细ID或实盘数量' });
+  const result = db.recordInventoryItem(id, item_id, actual_qty, missing_reason, notes, req.user.id, req.user.name);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  db.forceSave();
+  res.json(result);
+});
+
+app.put('/api/inventory/batches/:id/record-batch', requireRole('admin', 'lab_manager'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const { records } = req.body;
+  if (!Array.isArray(records) || records.length === 0) return res.status(400).json({ error: '缺少批量录入数据' });
+  const results = [];
+  for (const r of records) {
+    if (r.item_id == null || r.actual_qty == null) {
+      results.push({ item_id: r.item_id, ok: false, error: '缺少明细ID或实盘数量' });
+      continue;
+    }
+    const result = db.recordInventoryItem(id, r.item_id, r.actual_qty, r.missing_reason, r.notes, req.user.id, req.user.name);
+    results.push({ item_id: r.item_id, ...result });
+  }
+  db.forceSave();
+  res.json({ ok: true, results });
+});
+
+app.post('/api/inventory/batches/:id/calculate-diff', requireRole('admin', 'lab_manager'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const result = db.calculateInventoryDiff(id, req.user.id, req.user.name);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  res.json(result);
+});
+
+app.put('/api/inventory/batches/:id/confirm-diff', requireRole('admin', 'lab_manager'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const result = db.confirmInventoryDiff(id, req.user.id, req.user.name);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  res.json(result);
+});
+
+app.put('/api/inventory/batches/:id/correct-item/:itemId', requireRole('admin', 'lab_manager'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const itemId = parseInt(req.params.itemId);
+  const result = db.correctInventoryItem(id, itemId, req.user.id, req.user.name);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  res.json(result);
+});
+
+app.put('/api/inventory/batches/:id/resolve-conflict/:itemId', requireRole('admin', 'lab_manager'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const itemId = parseInt(req.params.itemId);
+  const result = db.resolveConflictAndCorrect(id, itemId, req.user.id, req.user.name);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  res.json(result);
+});
+
+app.put('/api/inventory/batches/:id/correct-all', requireRole('admin', 'lab_manager'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const batch = db.getInventoryBatchById(id);
+  if (!batch) return res.status(404).json({ error: '盘点批次不存在' });
+  if (!['diff_confirmed', 'correcting'].includes(batch.status)) {
+    return res.status(400).json({ error: `当前状态为 ${batch.status}，无法批量纠偏` });
+  }
+  const results = [];
+  const itemsToCorrect = batch.items.filter(i => i.diff_qty !== 0 && i.status !== 'corrected' && i.status !== 'conflict_blocked');
+  for (const item of itemsToCorrect) {
+    const result = db.correctInventoryItem(id, item.id, req.user.id, req.user.name);
+    results.push({ item_id: item.id, equipment_name: item.equipment_name, ...result });
+  }
+  db.forceSave();
+  res.json({ ok: true, corrected: results.filter(r => r.ok).length, failed: results.filter(r => !r.ok).length, results });
+});
+
+app.put('/api/inventory/batches/:id/cancel', requireRole('admin', 'lab_manager'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const result = db.cancelInventoryBatch(id, req.user.id, req.user.name);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  res.json(result);
+});
+
+app.get('/api/inventory/batches/:id/export-csv', requireRole('admin', 'lab_manager'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const batch = db.getInventoryBatchById(id);
+  if (!batch) return res.status(404).json({ error: '盘点批次不存在' });
+  const rows = [];
+  rows.push(['批次号', '学期', '实验室', '批次状态', '器材ID', '器材名称', '账面数量', '实盘数量', '已预约未领用', '待归还', '已审批损耗', '差异数量', '缺失原因', '备注', '明细状态', '冲突信息', '录入人', '录入时间']);
+  batch.items.forEach(item => {
+    const conflictStr = item.conflict_info || '';
+    rows.push([
+      batch.batch_no, batch.semester, batch.lab_name || '', batch.status,
+      item.equipment_id, item.equipment_name, item.book_qty,
+      item.actual_qty != null ? item.actual_qty : '',
+      item.pending_reserve_qty, item.pending_return_qty, item.approved_loss_qty,
+      item.diff_qty != null ? item.diff_qty : '',
+      item.missing_reason || '', item.notes || '',
+      item.status, conflictStr, '', item.recorded_at || ''
+    ]);
+  });
+  const csvContent = rows.map(r => r.map(cell => {
+    const s = String(cell == null ? '' : cell);
+    return s.includes(',') || s.includes('"') || s.includes('\n')
+      ? `"${s.replace(/"/g, '""')}"` : s;
+  }).join(',')).join('\n');
+  const filename = `inventory-${batch.batch_no}.csv`;
+  const bom = '\uFEFF';
+  db.addLog('export_inventory_csv', req.user.id, req.user.name, { batch_id: id, batch_no: batch.batch_no, filename });
+  db.forceSave();
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(bom + csvContent);
+});
+
+app.post('/api/inventory/import/csv', requireRole('admin', 'lab_manager'), (req, res) => {
+  const { csv_data, batch_id } = req.body;
+  if (!csv_data || !batch_id) return res.status(400).json({ error: '缺少 CSV 数据或批次ID' });
+  const batch = db.getInventoryBatchById(parseInt(batch_id));
+  if (!batch) return res.status(404).json({ error: '盘点批次不存在' });
+  if (!['locked', 'counting'].includes(batch.status)) {
+    return res.status(400).json({ error: `当前批次状态为 ${batch.status}，无法导入实盘数据` });
+  }
+  const lines = csv_data.split('\n').filter(l => l.trim());
+  if (lines.length < 2) return res.status(400).json({ error: 'CSV 数据至少需要标题行和一行数据' });
+  const report = { imported: 0, skipped: 0, failed: 0, details: [] };
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseCsvLine(lines[i]);
+    const row = i + 1;
+    const eqId = parseInt(cols[4]);
+    const actualQty = parseInt(cols[7]);
+    if (isNaN(eqId) || isNaN(actualQty)) {
+      report.failed++;
+      report.details.push({ row, error: '器材ID或实盘数量格式错误' });
+      continue;
+    }
+    const item = db.get('SELECT * FROM inventory_items WHERE batch_id = ? AND equipment_id = ?', [parseInt(batch_id), eqId]);
+    if (!item) {
+      report.skipped++;
+      report.details.push({ row, equipment_id: eqId, error: '该批次中无此器材' });
+      continue;
+    }
+    const missingReason = cols[11] || null;
+    const notes = cols[12] || null;
+    const result = db.recordInventoryItem(parseInt(batch_id), item.id, actualQty, missingReason, notes, req.user.id, req.user.name);
+    if (result.ok) {
+      report.imported++;
+      report.details.push({ row, equipment_id: eqId, action: 'imported' });
+    } else {
+      report.failed++;
+      report.details.push({ row, equipment_id: eqId, error: result.error });
+    }
+  }
+  db.addLog('import_inventory_csv', req.user.id, req.user.name, { batch_id: parseInt(batch_id), ...report });
+  db.forceSave();
+  res.json({ ok: true, ...report });
+});
+
+function parseCsvLine(line) {
+  const result = [];
+  let current = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (i + 1 < line.length && line[i + 1] === '"') {
+          current += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        current += ch;
+      }
+    } else {
+      if (ch === '"') {
+        inQuotes = true;
+      } else if (ch === ',') {
+        result.push(current);
+        current = '';
+      } else {
+        current += ch;
+      }
+    }
+  }
+  result.push(current);
+  return result;
+}
+
+app.get('/api/inventory/teacher-items', requireAuth, (req, res) => {
+  if (req.user.role !== 'teacher') return res.status(403).json({ error: '仅教师可访问' });
+  const items = db.getInventoryItemsForTeacher(req.user.id);
+  res.json(items);
+});
+
 app.post('/api/reset', (req, res) => {
   Object.keys(sessions).forEach(k => delete sessions[k]);
   db.initDatabase(true).then(() => {

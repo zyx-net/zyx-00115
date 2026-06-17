@@ -279,6 +279,80 @@ function runMigrations() {
     db.run('ALTER TABLE makeup_requests ADD COLUMN import_source TEXT');
     saveToFile();
   }
+
+  const existingTables3 = all("SELECT name FROM sqlite_master WHERE type='table'").map(r => r.name);
+
+  if (!existingTables3.includes('inventory_batches')) {
+    db.run(`
+      CREATE TABLE IF NOT EXISTS inventory_batches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch_no TEXT UNIQUE NOT NULL,
+        semester TEXT NOT NULL,
+        lab_name TEXT,
+        status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','locked','counting','diff_confirmed','correcting','completed','cancelled')),
+        scope_snapshot TEXT NOT NULL DEFAULT '{}',
+        created_by INTEGER REFERENCES users(id),
+        created_by_name TEXT,
+        locked_at TEXT,
+        locked_by INTEGER REFERENCES users(id),
+        diff_confirmed_at TEXT,
+        diff_confirmed_by INTEGER REFERENCES users(id),
+        corrected_at TEXT,
+        corrected_by INTEGER REFERENCES users(id),
+        completed_at TEXT,
+        cancelled_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+    saveToFile();
+  }
+
+  if (!existingTables3.includes('inventory_items')) {
+    db.run(`
+      CREATE TABLE IF NOT EXISTS inventory_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch_id INTEGER NOT NULL REFERENCES inventory_batches(id),
+        equipment_id INTEGER NOT NULL REFERENCES equipment(id),
+        equipment_name TEXT NOT NULL,
+        book_qty INTEGER NOT NULL DEFAULT 0,
+        actual_qty INTEGER,
+        pending_reserve_qty INTEGER NOT NULL DEFAULT 0,
+        pending_return_qty INTEGER NOT NULL DEFAULT 0,
+        approved_loss_qty INTEGER NOT NULL DEFAULT 0,
+        diff_qty INTEGER,
+        missing_reason TEXT,
+        notes TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','counted','diff_confirmed','corrected','conflict_blocked')),
+        conflict_info TEXT,
+        recorded_by INTEGER REFERENCES users(id),
+        recorded_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+    saveToFile();
+  }
+
+  if (!existingTables3.includes('inventory_corrections')) {
+    db.run(`
+      CREATE TABLE IF NOT EXISTS inventory_corrections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch_id INTEGER NOT NULL REFERENCES inventory_batches(id),
+        item_id INTEGER NOT NULL REFERENCES inventory_items(id),
+        equipment_id INTEGER NOT NULL REFERENCES equipment(id),
+        old_total_qty INTEGER NOT NULL,
+        new_total_qty INTEGER NOT NULL,
+        old_available_qty INTEGER NOT NULL,
+        new_available_qty INTEGER NOT NULL,
+        diff_qty INTEGER NOT NULL,
+        operator_id INTEGER REFERENCES users(id),
+        operator_name TEXT,
+        created_at TEXT NOT NULL
+      );
+    `);
+    saveToFile();
+  }
 }
 
 function createTables() {
@@ -517,6 +591,66 @@ function createTables() {
       original_hours REAL NOT NULL DEFAULT 0,
       delta_hours REAL NOT NULL DEFAULT 0,
       new_hours REAL NOT NULL DEFAULT 0,
+      operator_id INTEGER REFERENCES users(id),
+      operator_name TEXT,
+      created_at TEXT NOT NULL
+    );
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS inventory_batches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_no TEXT UNIQUE NOT NULL,
+      semester TEXT NOT NULL,
+      lab_name TEXT,
+      status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','locked','counting','diff_confirmed','correcting','completed','cancelled')),
+      scope_snapshot TEXT NOT NULL DEFAULT '{}',
+      created_by INTEGER REFERENCES users(id),
+      created_by_name TEXT,
+      locked_at TEXT,
+      locked_by INTEGER REFERENCES users(id),
+      diff_confirmed_at TEXT,
+      diff_confirmed_by INTEGER REFERENCES users(id),
+      corrected_at TEXT,
+      corrected_by INTEGER REFERENCES users(id),
+      completed_at TEXT,
+      cancelled_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS inventory_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_id INTEGER NOT NULL REFERENCES inventory_batches(id),
+      equipment_id INTEGER NOT NULL REFERENCES equipment(id),
+      equipment_name TEXT NOT NULL,
+      book_qty INTEGER NOT NULL DEFAULT 0,
+      actual_qty INTEGER,
+      pending_reserve_qty INTEGER NOT NULL DEFAULT 0,
+      pending_return_qty INTEGER NOT NULL DEFAULT 0,
+      approved_loss_qty INTEGER NOT NULL DEFAULT 0,
+      diff_qty INTEGER,
+      missing_reason TEXT,
+      notes TEXT,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','counted','diff_confirmed','corrected','conflict_blocked')),
+      conflict_info TEXT,
+      recorded_by INTEGER REFERENCES users(id),
+      recorded_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS inventory_corrections (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_id INTEGER NOT NULL REFERENCES inventory_batches(id),
+      item_id INTEGER NOT NULL REFERENCES inventory_items(id),
+      equipment_id INTEGER NOT NULL REFERENCES equipment(id),
+      old_total_qty INTEGER NOT NULL,
+      new_total_qty INTEGER NOT NULL,
+      old_available_qty INTEGER NOT NULL,
+      new_available_qty INTEGER NOT NULL,
+      diff_qty INTEGER NOT NULL,
       operator_id INTEGER REFERENCES users(id),
       operator_name TEXT,
       created_at TEXT NOT NULL
@@ -1528,6 +1662,290 @@ function getSchedulesByTeacherId(teacherId) {
   `, [teacherId]);
 }
 
+function generateInventoryBatchNo() {
+  const now = new Date();
+  const ymd = now.toISOString().slice(0, 10).replace(/-/g, '');
+  const rand = Math.floor(Math.random() * 9000 + 1000);
+  return `INV${ymd}${rand}`;
+}
+
+function createInventoryBatch(semester, labName, createdBy, createdByName) {
+  const now = new Date().toISOString();
+  let batchNo;
+  while (true) {
+    batchNo = generateInventoryBatchNo();
+    const exist = get('SELECT id FROM inventory_batches WHERE batch_no = ?', [batchNo]);
+    if (!exist) break;
+  }
+  const equipment = all('SELECT * FROM equipment ORDER BY id');
+  const scopeSnapshot = JSON.stringify({
+    semester,
+    lab_name: labName || null,
+    equipment_count: equipment.length,
+    total_qty_sum: equipment.reduce((s, e) => s + e.total_qty, 0)
+  });
+  const batchId = insertRun(
+    `INSERT INTO inventory_batches (batch_no, semester, lab_name, status, scope_snapshot, created_by, created_by_name, created_at, updated_at)
+     VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?)`,
+    [batchNo, semester, labName || null, scopeSnapshot, createdBy, createdByName, now, now]
+  );
+  equipment.forEach(eq => {
+    const pendingReserve = get(
+      `SELECT COALESCE(SUM(qty),0) AS total FROM reservations WHERE equipment_id = ? AND status IN ('pending','approved')`,
+      [eq.id]
+    );
+    const pendingReturn = get(
+      `SELECT COALESCE(SUM(qty - COALESCE(returned_qty,0)),0) AS total FROM reservations WHERE equipment_id = ? AND status IN ('collected','partially_returned')`,
+      [eq.id]
+    );
+    const approvedLoss = get(
+      `SELECT COALESCE(SUM(qty),0) AS total FROM loss_reports WHERE equipment_id = ? AND status = 'approved'`,
+      [eq.id]
+    );
+    insertRun(
+      `INSERT INTO inventory_items (batch_id, equipment_id, equipment_name, book_qty, pending_reserve_qty, pending_return_qty, approved_loss_qty, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+      [batchId, eq.id, eq.name, eq.total_qty,
+       pendingReserve ? pendingReserve.total : 0,
+       pendingReturn ? pendingReturn.total : 0,
+       approvedLoss ? approvedLoss.total : 0,
+       now, now]
+    );
+  });
+  addLog('create_inventory_batch', createdBy, createdByName, {
+    batch_id: batchId, batch_no: batchNo, semester, lab_name: labName
+  });
+  return getInventoryBatchById(batchId);
+}
+
+function getInventoryBatchById(id) {
+  const row = get('SELECT * FROM inventory_batches WHERE id = ?', [id]);
+  if (!row) return null;
+  try { row.scope_snapshot = JSON.parse(row.scope_snapshot); } catch(e) {}
+  row.items = all('SELECT * FROM inventory_items WHERE batch_id = ? ORDER BY equipment_id', [id]);
+  row.corrections = all('SELECT * FROM inventory_corrections WHERE batch_id = ? ORDER BY id', [id]);
+  return row;
+}
+
+function getInventoryBatches(filters, currentUser) {
+  let sql = 'SELECT * FROM inventory_batches WHERE 1=1';
+  const params = [];
+  if (filters.semester) { sql += ' AND semester = ?'; params.push(filters.semester); }
+  if (filters.status) { sql += ' AND status = ?'; params.push(filters.status); }
+  if (filters.lab_name) { sql += ' AND lab_name LIKE ?'; params.push(`%${filters.lab_name}%`); }
+  if (currentUser && currentUser.role === 'teacher') {
+    sql += ' AND (status IN (\'diff_confirmed\',\'correcting\',\'completed\'))';
+  }
+  sql += ' ORDER BY created_at DESC LIMIT 100';
+  const rows = all(sql, params);
+  rows.forEach(r => {
+    try { r.scope_snapshot = JSON.parse(r.scope_snapshot); } catch(e) {}
+  });
+  return rows;
+}
+
+function lockInventoryBatch(batchId, userId, userName) {
+  const batch = get('SELECT * FROM inventory_batches WHERE id = ?', [batchId]);
+  if (!batch) return { ok: false, error: '盘点批次不存在' };
+  if (batch.status !== 'draft') return { ok: false, error: `当前状态为 ${batch.status}，无法锁定` };
+  const now = new Date().toISOString();
+  run('UPDATE inventory_batches SET status = \'locked\', locked_at = ?, locked_by = ?, updated_at = ? WHERE id = ?',
+    [now, userId, now, batchId]);
+  addLog('lock_inventory_batch', userId, userName, { batch_id: batchId });
+  return { ok: true };
+}
+
+function recordInventoryItem(batchId, itemId, actualQty, missingReason, notes, userId, userName) {
+  const batch = get('SELECT * FROM inventory_batches WHERE id = ?', [batchId]);
+  if (!batch) return { ok: false, error: '盘点批次不存在' };
+  if (!['locked', 'counting'].includes(batch.status)) {
+    return { ok: false, error: `当前批次状态为 ${batch.status}，无法录入实盘数据` };
+  }
+  const item = get('SELECT * FROM inventory_items WHERE id = ? AND batch_id = ?', [itemId, batchId]);
+  if (!item) return { ok: false, error: '盘点明细不存在' };
+  const now = new Date().toISOString();
+  const diffQty = (actualQty != null ? actualQty : 0) - item.book_qty;
+  run(`UPDATE inventory_items SET actual_qty = ?, diff_qty = ?, missing_reason = ?, notes = ?, status = 'counted', recorded_by = ?, recorded_at = ?, updated_at = ? WHERE id = ?`,
+    [actualQty != null ? actualQty : null, diffQty, missingReason || null, notes || null, userId, now, now, itemId]);
+  if (batch.status === 'locked') {
+    run('UPDATE inventory_batches SET status = \'counting\', updated_at = ? WHERE id = ?', [now, batchId]);
+  }
+  addLog('record_inventory_item', userId, userName, { batch_id: batchId, item_id: itemId, actual_qty: actualQty, diff_qty: diffQty });
+  return { ok: true, diff_qty: diffQty };
+}
+
+function calculateInventoryDiff(batchId, userId, userName) {
+  const batch = get('SELECT * FROM inventory_batches WHERE id = ?', [batchId]);
+  if (!batch) return { ok: false, error: '盘点批次不存在' };
+  if (!['locked', 'counting'].includes(batch.status)) {
+    return { ok: false, error: `当前批次状态为 ${batch.status}，无法计算差异` };
+  }
+  const items = all('SELECT * FROM inventory_items WHERE batch_id = ?', [batchId]);
+  const uncounted = items.filter(i => i.actual_qty == null);
+  if (uncounted.length > 0) {
+    return { ok: false, error: `还有 ${uncounted.length} 项器材未录入实盘数量` };
+  }
+  const conflicts = [];
+  items.forEach(item => {
+    if (item.diff_qty !== 0) {
+      const eq = get('SELECT * FROM equipment WHERE id = ?', [item.equipment_id]);
+      const inTransit = item.pending_reserve_qty + item.pending_return_qty;
+      if (inTransit > 0 && Math.abs(item.diff_qty) > 0) {
+        const conflictInfo = JSON.stringify({
+          equipment_id: item.equipment_id,
+          equipment_name: item.equipment_name,
+          book_qty: item.book_qty,
+          actual_qty: item.actual_qty,
+          diff_qty: item.diff_qty,
+          pending_reserve_qty: item.pending_reserve_qty,
+          pending_return_qty: item.pending_return_qty,
+          reason: `器材 ${item.equipment_name} 有 ${item.pending_reserve_qty} 件已预约未领用、${item.pending_return_qty} 件待归还正在流转中，差异 ${item.diff_qty} 件不能直接纠偏`
+        });
+        run(`UPDATE inventory_items SET status = 'conflict_blocked', conflict_info = ?, updated_at = ? WHERE id = ?`,
+          [conflictInfo, new Date().toISOString(), item.id]);
+        conflicts.push({ item_id: item.id, equipment_name: item.equipment_name, diff_qty: item.diff_qty, in_transit: inTransit });
+      } else {
+        run(`UPDATE inventory_items SET status = 'counted', updated_at = ? WHERE id = ?`, [new Date().toISOString(), item.id]);
+      }
+    }
+  });
+  addLog('calculate_inventory_diff', userId, userName, {
+    batch_id: batchId, total_items: items.length,
+    conflict_count: conflicts.length, diff_items: items.filter(i => i.diff_qty !== 0).length
+  });
+  forceSave();
+  return { ok: true, total_items: items.length, diff_items: items.filter(i => i.diff_qty !== 0).length, conflicts };
+}
+
+function confirmInventoryDiff(batchId, userId, userName) {
+  const batch = get('SELECT * FROM inventory_batches WHERE id = ?', [batchId]);
+  if (!batch) return { ok: false, error: '盘点批次不存在' };
+  if (!['counting'].includes(batch.status)) {
+    return { ok: false, error: `当前批次状态为 ${batch.status}，无法确认差异` };
+  }
+  const conflictItems = all('SELECT * FROM inventory_items WHERE batch_id = ? AND status = \'conflict_blocked\'', [batchId]);
+  if (conflictItems.length > 0) {
+    return { ok: false, error: `存在 ${conflictItems.length} 项冲突未解决，无法确认差异。请先处理冲突或等待流转完成。` };
+  }
+  const now = new Date().toISOString();
+  const items = all('SELECT * FROM inventory_items WHERE batch_id = ? AND diff_qty != 0', [batchId]);
+  run('UPDATE inventory_items SET status = \'diff_confirmed\' WHERE batch_id = ? AND status = \'counted\'', [batchId]);
+  run('UPDATE inventory_batches SET status = \'diff_confirmed\', diff_confirmed_at = ?, diff_confirmed_by = ?, updated_at = ? WHERE id = ?',
+    [now, userId, now, batchId]);
+  addLog('confirm_inventory_diff', userId, userName, {
+    batch_id: batchId, diff_items: items.length
+  });
+  forceSave();
+  return { ok: true, diff_items: items.length };
+}
+
+function resolveConflictAndCorrect(batchId, itemId, userId, userName) {
+  const batch = get('SELECT * FROM inventory_batches WHERE id = ?', [batchId]);
+  if (!batch) return { ok: false, error: '盘点批次不存在' };
+  if (!['counting', 'diff_confirmed', 'correcting'].includes(batch.status)) {
+    return { ok: false, error: `当前批次状态为 ${batch.status}，无法执行冲突解决` };
+  }
+  const item = get('SELECT * FROM inventory_items WHERE id = ? AND batch_id = ?', [itemId, batchId]);
+  if (!item) return { ok: false, error: '盘点明细不存在' };
+  if (item.status !== 'conflict_blocked') return { ok: false, error: '该明细无冲突，无需冲突解决纠偏' };
+  const eq = get('SELECT * FROM equipment WHERE id = ?', [item.equipment_id]);
+  if (!eq) return { ok: false, error: '器材不存在' };
+  const livePendingReserve = get(
+    `SELECT COALESCE(SUM(qty),0) AS total FROM reservations WHERE equipment_id = ? AND status IN ('pending','approved')`,
+    [item.equipment_id]
+  );
+  const livePendingReturn = get(
+    `SELECT COALESCE(SUM(qty - COALESCE(returned_qty,0)),0) AS total FROM reservations WHERE equipment_id = ? AND status IN ('collected','partially_returned')`,
+    [item.equipment_id]
+  );
+  const liveInTransit = (livePendingReserve ? livePendingReserve.total : 0) + (livePendingReturn ? livePendingReturn.total : 0);
+  if (liveInTransit > 0) {
+    return { ok: false, error: `仍有 ${liveInTransit} 件器材在流转中，请等待流转完成后再纠偏` };
+  }
+  return _doCorrection(batchId, item, eq, userId, userName);
+}
+
+function correctInventoryItem(batchId, itemId, userId, userName) {
+  const batch = get('SELECT * FROM inventory_batches WHERE id = ?', [batchId]);
+  if (!batch) return { ok: false, error: '盘点批次不存在' };
+  if (!['diff_confirmed', 'correcting'].includes(batch.status)) {
+    return { ok: false, error: `当前批次状态为 ${batch.status}，无法执行纠偏` };
+  }
+  const item = get('SELECT * FROM inventory_items WHERE id = ? AND batch_id = ?', [itemId, batchId]);
+  if (!item) return { ok: false, error: '盘点明细不存在' };
+  if (item.diff_qty === 0) return { ok: false, error: '该项无差异，无需纠偏' };
+  if (item.status === 'conflict_blocked') {
+    return { ok: false, error: '该项存在冲突，请使用冲突解决纠偏接口' };
+  }
+  if (item.status === 'corrected') return { ok: false, error: '该项已纠偏' };
+  const eq = get('SELECT * FROM equipment WHERE id = ?', [item.equipment_id]);
+  if (!eq) return { ok: false, error: '器材不存在' };
+  return _doCorrection(batchId, item, eq, userId, userName);
+}
+
+function _doCorrection(batchId, item, eq, userId, userName) {
+  const now = new Date().toISOString();
+  const newTotal = item.actual_qty;
+  const newAvail = newTotal - eq.locked_qty;
+  if (newAvail < 0) return { ok: false, error: `纠偏后 ${item.equipment_name} 可用数量为负（${newAvail}），请检查` };
+  const oldTotal = eq.total_qty;
+  const oldAvail = eq.available_qty;
+  run('UPDATE equipment SET total_qty = ?, available_qty = ? WHERE id = ?', [newTotal, newAvail, item.equipment_id]);
+  insertRun(
+    `INSERT INTO inventory_corrections (batch_id, item_id, equipment_id, old_total_qty, new_total_qty, old_available_qty, new_available_qty, diff_qty, operator_id, operator_name, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [batchId, item.id, item.equipment_id, oldTotal, newTotal, oldAvail, newAvail, item.diff_qty, userId, userName, now]
+  );
+  run(`UPDATE inventory_items SET status = 'corrected', updated_at = ? WHERE id = ?`, [now, item.id]);
+  const batch = get('SELECT * FROM inventory_batches WHERE id = ?', [batchId]);
+  if (batch.status === 'diff_confirmed') {
+    run('UPDATE inventory_batches SET status = \'correcting\', updated_at = ? WHERE id = ?', [now, batchId]);
+  }
+  const remaining = get('SELECT COUNT(*) AS c FROM inventory_items WHERE batch_id = ? AND diff_qty != 0 AND status != \'corrected\'', [batchId]);
+  if (remaining.c === 0) {
+    run('UPDATE inventory_batches SET status = \'completed\', completed_at = ?, updated_at = ? WHERE id = ?', [now, now, batchId]);
+  }
+  addLog('correct_inventory_item', userId, userName, {
+    batch_id: batchId, item_id: item.id, equipment_id: item.equipment_id,
+    old_total: oldTotal, new_total: newTotal, diff_qty: item.diff_qty
+  });
+  forceSave();
+  return { ok: true, old_total: oldTotal, new_total: newTotal, diff_qty: item.diff_qty };
+}
+
+function cancelInventoryBatch(batchId, userId, userName) {
+  const batch = get('SELECT * FROM inventory_batches WHERE id = ?', [batchId]);
+  if (!batch) return { ok: false, error: '盘点批次不存在' };
+  if (['completed', 'cancelled'].includes(batch.status)) {
+    return { ok: false, error: `当前状态为 ${batch.status}，无法取消` };
+  }
+  if (batch.status === 'correcting') {
+    const corrected = get('SELECT COUNT(*) AS c FROM inventory_items WHERE batch_id = ? AND status = \'corrected\'', [batchId]);
+    if (corrected.c > 0) return { ok: false, error: '已执行部分纠偏，无法取消' };
+  }
+  const now = new Date().toISOString();
+  run('UPDATE inventory_batches SET status = \'cancelled\', cancelled_at = ?, updated_at = ? WHERE id = ?', [now, now, batchId]);
+  addLog('cancel_inventory_batch', userId, userName, { batch_id: batchId });
+  forceSave();
+  return { ok: true };
+}
+
+function getInventoryItemsForTeacher(teacherId) {
+  const courses = all('SELECT id FROM courses WHERE teacher_id = ?', [teacherId]);
+  const courseIds = courses.map(c => c.id);
+  if (courseIds.length === 0) return [];
+  const ph = courseIds.map(() => '?').join(',');
+  const equipmentIds = all(`SELECT DISTINCT equipment_id FROM reservations WHERE course_id IN (${ph})`, courseIds).map(r => r.equipment_id);
+  if (equipmentIds.length === 0) return [];
+  const eqPh = equipmentIds.map(() => '?').join(',');
+  return all(`SELECT ii.*, ib.batch_no, ib.semester, ib.status AS batch_status
+    FROM inventory_items ii
+    JOIN inventory_batches ib ON ii.batch_id = ib.id
+    WHERE ib.status IN ('diff_confirmed','correcting','completed')
+    AND ii.equipment_id IN (${eqPh})
+    ORDER BY ib.created_at DESC, ii.equipment_id`, equipmentIds);
+}
+
 module.exports = {
   initDatabase,
   run,
@@ -1572,5 +1990,17 @@ module.exports = {
   getClassrooms,
   getStudents,
   getSchedulesByClassId,
-  getSchedulesByTeacherId
+  getSchedulesByTeacherId,
+  generateInventoryBatchNo,
+  createInventoryBatch,
+  getInventoryBatchById,
+  getInventoryBatches,
+  lockInventoryBatch,
+  recordInventoryItem,
+  calculateInventoryDiff,
+  confirmInventoryDiff,
+  correctInventoryItem,
+  resolveConflictAndCorrect,
+  cancelInventoryBatch,
+  getInventoryItemsForTeacher
 };
