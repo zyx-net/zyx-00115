@@ -146,3 +146,307 @@ button:disabled {
   margin-top: 4px;
   line-height: 1.6;
 }
+
+.status-resubmitted { background: #ffe0b2; color: #e65100; }
+.status-revoked { background: #d1c4e9; color: #4527a0; }
+.status-completed { background: #b9f6ca; color: #1b5e20; }
+
+.btn-outline {
+  background: #fff;
+  color: #667eea;
+  border: 1px solid #667eea;
+}
+.btn-outline:hover {
+  background: #667eea;
+  color: #fff;
+}
+.btn-outline.btn-danger {
+  color: #dc3545;
+  border-color: #dc3545;
+}
+.btn-outline.btn-danger:hover {
+  background: #dc3545;
+  color: #fff;
+}
+
+.makeup-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 2px solid #e0e0e0;
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+}
+.makeup-tab {
+  padding: 10px 20px;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  color: #666;
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: 8px 8px 0 0;
+  transition: all 0.2s;
+  margin-bottom: -2px;
+  white-space: nowrap;
+}
+.makeup-tab:hover {
+  background: #f5f5ff;
+  color: #667eea;
+}
+.makeup-tab.active {
+  background: #fff;
+  color: #667eea;
+  border: 2px solid #e0e0e0;
+  border-bottom-color: #fff;
+  border-bottom-width: 3px;
+  position: relative;
+  z-index: 1;
+}
+.makeup-tab .tab-count {
+  display: inline-block;
+  background: #e0e0e0;
+  color: #666;
+  border-radius: 10px;
+  padding: 1px 8px;
+  font-size: 11px;
+  margin-left: 6px;
+  min-width: 18px;
+  text-align: center;
+}
+.makeup-tab.active .tab-count {
+  background: #667eea;
+  color: #fff;
+}
+
+.makeup-tab-panel {
+  display: none;
+}
+.makeup-tab-panel.active {
+  display: block;
+  animation: fadeIn 0.3s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.conflict-box {
+  border-radius: 8px;
+  padding: 14px 18px;
+  margin-bottom: 16px;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.conflict-box.conflict-error {
+  border: 1px solid #f5c6cb;
+  background: #fff5f5;
+  color: #721c24;
+}
+.conflict-box.conflict-ok {
+  border: 1px solid #c3e6cb;
+  background: #f0fff4;
+  color: #155724;
+}
+.conflict-box h5 {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.conflict-group {
+  margin: 8px 0;
+  padding-left: 12px;
+  border-left: 3px solid currentColor;
+  opacity: 0.9;
+}
+.conflict-group dt {
+  font-weight: 600;
+  margin-top: 4px;
+}
+.conflict-group dd {
+  margin-left: 12px;
+  opacity: 0.85;
+}
+
+.makeup-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 14px 20px;
+}
+.makeup-form-grid .full-width {
+  grid-column: 1 / -1;
+}
+@media (max-width: 720px) {
+  .makeup-form-grid { grid-template-columns: 1fr; }
+}
+
+.student-multi-select {
+  max-height: 180px;
+  overflow-y: auto;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  padding: 8px;
+  background: #fff;
+}
+.student-multi-select label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: normal;
+}
+.student-multi-select label:hover {
+  background: #f0f0ff;
+}
+.student-multi-select input[type="checkbox"] {
+  width: auto;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.detail-card {
+  background: #fafbff;
+  border-radius: 8px;
+  padding: 14px 16px;
+  border: 1px solid #ececf5;
+}
+.detail-card h5 {
+  font-size: 13px;
+  color: #888;
+  margin-bottom: 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px dashed #e0e0e0;
+  font-weight: 500;
+}
+.detail-card .kv {
+  display: flex;
+  justify-content: space-between;
+  padding: 3px 0;
+  font-size: 13px;
+}
+.detail-card .kv .k {
+  color: #888;
+}
+.detail-card .kv .v {
+  font-weight: 500;
+  color: #333;
+  text-align: right;
+  max-width: 60%;
+  word-break: break-all;
+}
+
+.action-btn-group {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.filter-bar {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  background: #fafbff;
+  border-radius: 8px;
+  border: 1px solid #ececf5;
+}
+.filter-bar .form-group {
+  margin-bottom: 0;
+  min-width: 140px;
+}
+.filter-bar .form-group label {
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+.filter-bar .form-group input,
+.filter-bar .form-group select {
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+.approval-timeline {
+  border-left: 2px solid #e0e0e0;
+  margin-left: 10px;
+  padding-left: 18px;
+}
+.approval-timeline .timeline-item {
+  position: relative;
+  padding-bottom: 14px;
+}
+.approval-timeline .timeline-item::before {
+  content: '';
+  position: absolute;
+  left: -25px;
+  top: 4px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #667eea;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 2px #667eea;
+}
+.approval-timeline .timeline-meta {
+  font-size: 12px;
+  color: #888;
+  margin-bottom: 2px;
+}
+.approval-timeline .timeline-meta .act-badge {
+  display: inline-block;
+  background: #667eea;
+  color: #fff;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  margin-right: 6px;
+  font-weight: 500;
+}
+.approval-timeline .timeline-comment {
+  font-size: 13px;
+  background: #f5f5ff;
+  padding: 6px 10px;
+  border-radius: 6px;
+  margin-top: 4px;
+}
+
+.import-result {
+  margin-top: 12px;
+  padding: 12px 14px;
+  background: #f8f9fa;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.import-result .res-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 3px 0;
+}
+.import-result .res-row.success .v { color: #28a745; font-weight: 600; }
+.import-result .res-row.warn .v { color: #f39c12; font-weight: 600; }
+.import-result .res-row.error .v { color: #dc3545; font-weight: 600; }
+.import-result .res-details {
+  margin-top: 8px;
+  max-height: 180px;
+  overflow-y: auto;
+  background: #fff;
+  padding: 6px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  border: 1px solid #e0e0e0;
+}
+.import-result .res-details .detail-item {
+  padding: 2px 0;
+  border-bottom: 1px dashed #f0f0f0;
+}
+.import-result .res-details .detail-item:last-child {
+  border-bottom: none;
+}

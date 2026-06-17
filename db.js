@@ -139,6 +139,146 @@ function runMigrations() {
     db.run('ALTER TABLE settlement_exports ADD COLUMN last_cleaned_stats TEXT');
     saveToFile();
   }
+
+  const existingTables2 = all("SELECT name FROM sqlite_master WHERE type='table'").map(r => r.name);
+
+  if (!existingTables2.includes('classrooms')) {
+    db.run(`
+      CREATE TABLE IF NOT EXISTS classrooms (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE NOT NULL,
+        capacity INTEGER NOT NULL DEFAULT 30,
+        equipment TEXT
+      );
+    `);
+    saveToFile();
+  }
+  if (!existingTables2.includes('students')) {
+    db.run(`
+      CREATE TABLE IF NOT EXISTS students (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        student_no TEXT UNIQUE NOT NULL,
+        name TEXT NOT NULL,
+        gender TEXT,
+        contact TEXT
+      );
+    `);
+    saveToFile();
+  }
+  if (!existingTables2.includes('class_students')) {
+    db.run(`
+      CREATE TABLE IF NOT EXISTS class_students (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        class_id INTEGER NOT NULL REFERENCES classes(id),
+        student_id INTEGER NOT NULL REFERENCES students(id),
+        UNIQUE(class_id, student_id)
+      );
+    `);
+    saveToFile();
+  }
+  if (!existingTables2.includes('course_schedules')) {
+    db.run(`
+      CREATE TABLE IF NOT EXISTS course_schedules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        course_id INTEGER NOT NULL REFERENCES courses(id),
+        class_id INTEGER NOT NULL REFERENCES classes(id),
+        teacher_id INTEGER NOT NULL REFERENCES users(id),
+        classroom_id INTEGER REFERENCES classrooms(id),
+        day_of_week INTEGER NOT NULL CHECK(day_of_week BETWEEN 1 AND 7),
+        start_time TEXT NOT NULL,
+        end_time TEXT NOT NULL,
+        semester TEXT NOT NULL,
+        hours_per_session REAL NOT NULL DEFAULT 2,
+        status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','cancelled','makeup')),
+        notes TEXT,
+        created_at TEXT NOT NULL
+      );
+    `);
+    saveToFile();
+  }
+  if (!existingTables2.includes('makeup_requests')) {
+    db.run(`
+      CREATE TABLE IF NOT EXISTS makeup_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        request_no TEXT UNIQUE NOT NULL,
+        type TEXT NOT NULL CHECK(type IN ('makeup','swap_class','reschedule')),
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected','cancelled','revoked','resubmitted','completed')),
+        teacher_id INTEGER NOT NULL REFERENCES users(id),
+        course_id INTEGER NOT NULL REFERENCES courses(id),
+        class_id INTEGER NOT NULL REFERENCES classes(id),
+        student_ids TEXT,
+        original_schedule_id INTEGER REFERENCES course_schedules(id),
+        original_date TEXT,
+        original_start_time TEXT,
+        original_end_time TEXT,
+        original_classroom_id INTEGER REFERENCES classrooms(id),
+        new_class_id INTEGER REFERENCES classes(id),
+        new_date TEXT,
+        new_start_time TEXT,
+        new_end_time TEXT,
+        new_classroom_id INTEGER REFERENCES classrooms(id),
+        new_teacher_id INTEGER REFERENCES users(id),
+        hours REAL NOT NULL DEFAULT 2,
+        reason TEXT NOT NULL,
+        submit_reason TEXT,
+        reject_reason TEXT,
+        revoke_reason TEXT,
+        approval_comment TEXT,
+        approved_by INTEGER REFERENCES users(id),
+        approved_at TEXT,
+        rejected_by INTEGER REFERENCES users(id),
+        rejected_at TEXT,
+        revoked_by INTEGER REFERENCES users(id),
+        revoked_at TEXT,
+        cancelled_by INTEGER REFERENCES users(id),
+        cancelled_at TEXT,
+        resubmitted_count INTEGER NOT NULL DEFAULT 0,
+        parent_request_id INTEGER REFERENCES makeup_requests(id),
+        hours_written_back INTEGER NOT NULL DEFAULT 0,
+        import_source TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+    saveToFile();
+  }
+  if (!existingTables2.includes('makeup_approvals')) {
+    db.run(`
+      CREATE TABLE IF NOT EXISTS makeup_approvals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        request_id INTEGER NOT NULL REFERENCES makeup_requests(id),
+        action TEXT NOT NULL CHECK(action IN ('submit','approve','reject','revoke','cancel','resubmit','writeback','import')),
+        operator_id INTEGER REFERENCES users(id),
+        operator_name TEXT,
+        comment TEXT,
+        details TEXT,
+        created_at TEXT NOT NULL
+      );
+    `);
+    saveToFile();
+  }
+  if (!existingTables2.includes('makeup_hours_writeback')) {
+    db.run(`
+      CREATE TABLE IF NOT EXISTS makeup_hours_writeback (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        request_id INTEGER NOT NULL REFERENCES makeup_requests(id),
+        schedule_id INTEGER REFERENCES course_schedules(id),
+        original_hours REAL NOT NULL DEFAULT 0,
+        delta_hours REAL NOT NULL DEFAULT 0,
+        new_hours REAL NOT NULL DEFAULT 0,
+        operator_id INTEGER REFERENCES users(id),
+        operator_name TEXT,
+        created_at TEXT NOT NULL
+      );
+    `);
+    saveToFile();
+  }
+
+  const mrCols = all("PRAGMA table_info(makeup_requests)").map(c => c.name);
+  if (!mrCols.includes('import_source')) {
+    db.run('ALTER TABLE makeup_requests ADD COLUMN import_source TEXT');
+    saveToFile();
+  }
 }
 
 function createTables() {
@@ -272,6 +412,116 @@ function createTables() {
       last_cleaned_stats TEXT
     );
   `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS classrooms (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT UNIQUE NOT NULL,
+      capacity INTEGER NOT NULL DEFAULT 30,
+      equipment TEXT
+    );
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS students (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      student_no TEXT UNIQUE NOT NULL,
+      name TEXT NOT NULL,
+      gender TEXT,
+      contact TEXT
+    );
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS class_students (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      class_id INTEGER NOT NULL REFERENCES classes(id),
+      student_id INTEGER NOT NULL REFERENCES students(id),
+      UNIQUE(class_id, student_id)
+    );
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS course_schedules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      course_id INTEGER NOT NULL REFERENCES courses(id),
+      class_id INTEGER NOT NULL REFERENCES classes(id),
+      teacher_id INTEGER NOT NULL REFERENCES users(id),
+      classroom_id INTEGER REFERENCES classrooms(id),
+      day_of_week INTEGER NOT NULL CHECK(day_of_week BETWEEN 1 AND 7),
+      start_time TEXT NOT NULL,
+      end_time TEXT NOT NULL,
+      semester TEXT NOT NULL,
+      hours_per_session REAL NOT NULL DEFAULT 2,
+      status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','cancelled','makeup')),
+      notes TEXT,
+      created_at TEXT NOT NULL
+    );
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS makeup_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_no TEXT UNIQUE NOT NULL,
+      type TEXT NOT NULL CHECK(type IN ('makeup','swap_class','reschedule')),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected','cancelled','revoked','resubmitted','completed')),
+      teacher_id INTEGER NOT NULL REFERENCES users(id),
+      course_id INTEGER NOT NULL REFERENCES courses(id),
+      class_id INTEGER NOT NULL REFERENCES classes(id),
+      student_ids TEXT,
+      original_schedule_id INTEGER REFERENCES course_schedules(id),
+      original_date TEXT,
+      original_start_time TEXT,
+      original_end_time TEXT,
+      original_classroom_id INTEGER REFERENCES classrooms(id),
+      new_class_id INTEGER REFERENCES classes(id),
+      new_date TEXT,
+      new_start_time TEXT,
+      new_end_time TEXT,
+      new_classroom_id INTEGER REFERENCES classrooms(id),
+      new_teacher_id INTEGER REFERENCES users(id),
+      hours REAL NOT NULL DEFAULT 2,
+      reason TEXT NOT NULL,
+      submit_reason TEXT,
+      reject_reason TEXT,
+      revoke_reason TEXT,
+      approval_comment TEXT,
+      approved_by INTEGER REFERENCES users(id),
+      approved_at TEXT,
+      rejected_by INTEGER REFERENCES users(id),
+      rejected_at TEXT,
+      revoked_by INTEGER REFERENCES users(id),
+      revoked_at TEXT,
+      cancelled_by INTEGER REFERENCES users(id),
+      cancelled_at TEXT,
+      resubmitted_count INTEGER NOT NULL DEFAULT 0,
+      parent_request_id INTEGER REFERENCES makeup_requests(id),
+      hours_written_back INTEGER NOT NULL DEFAULT 0,
+      import_source TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS makeup_approvals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_id INTEGER NOT NULL REFERENCES makeup_requests(id),
+      action TEXT NOT NULL CHECK(action IN ('submit','approve','reject','revoke','cancel','resubmit','writeback','import')),
+      operator_id INTEGER REFERENCES users(id),
+      operator_name TEXT,
+      comment TEXT,
+      details TEXT,
+      created_at TEXT NOT NULL
+    );
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS makeup_hours_writeback (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_id INTEGER NOT NULL REFERENCES makeup_requests(id),
+      schedule_id INTEGER REFERENCES course_schedules(id),
+      original_hours REAL NOT NULL DEFAULT 0,
+      delta_hours REAL NOT NULL DEFAULT 0,
+      new_hours REAL NOT NULL DEFAULT 0,
+      operator_id INTEGER REFERENCES users(id),
+      operator_name TEXT,
+      created_at TEXT NOT NULL
+    );
+  `);
 }
 
 function seedData() {
@@ -295,6 +545,34 @@ function seedData() {
   db.run("INSERT INTO classes (name, course_id, semester) VALUES ('物理实验A班', 1, '2025-2026-2')");
   db.run("INSERT INTO classes (name, course_id, semester) VALUES ('物理实验B班', 1, '2025-2026-2')");
   db.run("INSERT INTO classes (name, course_id, semester) VALUES ('化学实验A班', 2, '2025-2026-2')");
+
+  db.run("INSERT INTO classrooms (name, capacity, equipment) VALUES ('物理实验室A101', 40, '示波器、万用表')");
+  db.run("INSERT INTO classrooms (name, capacity, equipment) VALUES ('物理实验室A102', 35, '示波器、显微镜')");
+  db.run("INSERT INTO classrooms (name, capacity, equipment) VALUES ('化学实验室B201', 30, '烧杯、试管')");
+  db.run("INSERT INTO classrooms (name, capacity, equipment) VALUES ('生物实验室C301', 25, '显微镜')");
+
+  db.run("INSERT INTO students (student_no, name, gender, contact) VALUES ('202501001', '小明', '男', '13800000001')");
+  db.run("INSERT INTO students (student_no, name, gender, contact) VALUES ('202501002', '小红', '女', '13800000002')");
+  db.run("INSERT INTO students (student_no, name, gender, contact) VALUES ('202501003', '小刚', '男', '13800000003')");
+  db.run("INSERT INTO students (student_no, name, gender, contact) VALUES ('202501004', '小丽', '女', '13800000004')");
+  db.run("INSERT INTO students (student_no, name, gender, contact) VALUES ('202501005', '小华', '男', '13800000005')");
+  db.run("INSERT INTO students (student_no, name, gender, contact) VALUES ('202501006', '小芳', '女', '13800000006')");
+  db.run("INSERT INTO students (student_no, name, gender, contact) VALUES ('202501007', '小强', '男', '13800000007')");
+  db.run("INSERT INTO students (student_no, name, gender, contact) VALUES ('202501008', '小燕', '女', '13800000008')");
+
+  db.run("INSERT INTO class_students (class_id, student_id) VALUES (1, 1)");
+  db.run("INSERT INTO class_students (class_id, student_id) VALUES (1, 2)");
+  db.run("INSERT INTO class_students (class_id, student_id) VALUES (1, 3)");
+  db.run("INSERT INTO class_students (class_id, student_id) VALUES (1, 4)");
+  db.run("INSERT INTO class_students (class_id, student_id) VALUES (2, 5)");
+  db.run("INSERT INTO class_students (class_id, student_id) VALUES (2, 6)");
+  db.run("INSERT INTO class_students (class_id, student_id) VALUES (3, 7)");
+  db.run("INSERT INTO class_students (class_id, student_id) VALUES (3, 8)");
+
+  db.run(`INSERT INTO course_schedules (course_id, class_id, teacher_id, classroom_id, day_of_week, start_time, end_time, semester, hours_per_session, status, notes, created_at) VALUES (1, 1, 2, 1, 3, '08:00', '10:00', '2025-2026-2', 2, 'active', '周三上午物理实验A班', '${now}')`);
+  db.run(`INSERT INTO course_schedules (course_id, class_id, teacher_id, classroom_id, day_of_week, start_time, end_time, semester, hours_per_session, status, notes, created_at) VALUES (1, 2, 2, 2, 4, '14:00', '16:00', '2025-2026-2', 2, 'active', '周四下午物理实验B班', '${now}')`);
+  db.run(`INSERT INTO course_schedules (course_id, class_id, teacher_id, classroom_id, day_of_week, start_time, end_time, semester, hours_per_session, status, notes, created_at) VALUES (2, 3, 3, 3, 2, '09:00', '11:00', '2025-2026-2', 2, 'active', '周二上午化学实验A班', '${now}')`);
+  db.run(`INSERT INTO course_schedules (course_id, class_id, teacher_id, classroom_id, day_of_week, start_time, end_time, semester, hours_per_session, status, notes, created_at) VALUES (3, 1, 2, 4, 5, '10:00', '12:00', '2025-2026-2', 2, 'active', '周五上午生物基础实验', '${now}')`);
 
   db.run(`INSERT INTO operation_logs (action, user_id, user_name, details, created_at) VALUES ('system_init', 1, '系统管理员', '系统初始化，导入样例数据', '${now}')`);
 }
@@ -834,6 +1112,422 @@ function getLedgerSummary(filters = {}) {
   };
 }
 
+function generateMakeupRequestNo() {
+  const now = new Date();
+  const ymd = now.toISOString().slice(0, 10).replace(/-/g, '');
+  const rand = Math.floor(Math.random() * 9000 + 1000);
+  return `MK${ymd}${rand}`;
+}
+
+function dateToDayOfWeek(dateStr) {
+  const d = new Date(dateStr);
+  const wd = d.getDay();
+  return wd === 0 ? 7 : wd;
+}
+
+function timeToMinutes(timeStr) {
+  const [h, m] = timeStr.split(':').map(Number);
+  return h * 60 + m;
+}
+
+function isTimeOverlap(s1, e1, s2, e2) {
+  const a = timeToMinutes(s1);
+  const b = timeToMinutes(e1);
+  const c = timeToMinutes(s2);
+  const d = timeToMinutes(e2);
+  return !(b <= c || d <= a);
+}
+
+function parseStudentIds(studentIds) {
+  if (!studentIds) return [];
+  if (Array.isArray(studentIds)) return studentIds.map(Number).filter(n => !isNaN(n));
+  try {
+    const parsed = JSON.parse(studentIds);
+    return Array.isArray(parsed) ? parsed.map(Number).filter(n => !isNaN(n)) : [];
+  } catch (e) {
+    return String(studentIds).split(',').map(s => Number(s.trim())).filter(n => !isNaN(n));
+  }
+}
+
+function serializeStudentIds(arr) {
+  if (!arr || arr.length === 0) return null;
+  return JSON.stringify(arr.map(Number));
+}
+
+function getStudentsByClassId(classId) {
+  return all(`
+    SELECT s.* FROM students s
+    JOIN class_students cs ON cs.student_id = s.id
+    WHERE cs.class_id = ?
+    ORDER BY s.student_no
+  `, [classId]);
+}
+
+function getClassroomScheduleBusySlots(classroomId, date, excludeRequestId) {
+  const dow = dateToDayOfWeek(date);
+  const slots = [];
+
+  all(`
+    SELECT id, day_of_week, start_time, end_time, class_id
+    FROM course_schedules
+    WHERE classroom_id = ? AND status = 'active' AND day_of_week = ?
+  `, [classroomId, dow]).forEach(r => {
+    slots.push({ type: 'schedule', id: r.id, start: r.start_time, end: r.end_time, class_id: r.class_id });
+  });
+
+  const params = [classroomId, date];
+  let excl = '';
+  if (excludeRequestId) { params.push(excludeRequestId); excl = ' AND mr.id != ?'; }
+  all(`
+    SELECT mr.id, mr.new_start_time, mr.new_end_time, mr.class_id
+    FROM makeup_requests mr
+    WHERE mr.new_classroom_id = ? AND mr.new_date = ?
+      AND mr.status IN ('pending','approved','resubmitted')${excl}
+  `, params).forEach(r => {
+    slots.push({ type: 'request', id: r.id, start: r.new_start_time, end: r.new_end_time, class_id: r.class_id });
+  });
+  return slots;
+}
+
+function getTeacherScheduleBusySlots(teacherId, date, excludeRequestId) {
+  const dow = dateToDayOfWeek(date);
+  const slots = [];
+
+  all(`
+    SELECT id, day_of_week, start_time, end_time, class_id
+    FROM course_schedules
+    WHERE teacher_id = ? AND status = 'active' AND day_of_week = ?
+  `, [teacherId, dow]).forEach(r => {
+    slots.push({ type: 'schedule', id: r.id, start: r.start_time, end: r.end_time, class_id: r.class_id });
+  });
+
+  const params = [teacherId, teacherId, date];
+  let excl = '';
+  if (excludeRequestId) { params.push(excludeRequestId); excl = ' AND mr.id != ?'; }
+  all(`
+    SELECT mr.id, mr.new_start_time, mr.new_end_time, mr.class_id
+    FROM makeup_requests mr
+    WHERE (mr.new_teacher_id = ? OR (mr.new_teacher_id IS NULL AND mr.teacher_id = ?))
+      AND mr.new_date = ?
+      AND mr.status IN ('pending','approved','resubmitted')${excl}
+  `, params).forEach(r => {
+    slots.push({ type: 'request', id: r.id, start: r.new_start_time, end: r.new_end_time, class_id: r.class_id });
+  });
+  return slots;
+}
+
+function getStudentBusySlots(studentIds, date, excludeRequestId) {
+  if (!studentIds || studentIds.length === 0) return [];
+  const dow = dateToDayOfWeek(date);
+  const placeholders = studentIds.map(() => '?').join(',');
+  const slots = [];
+
+  all(`
+    SELECT DISTINCT s.id, s.student_no, s.name, sc.day_of_week, sc.start_time, sc.end_time, sc.class_id
+    FROM course_schedules sc
+    JOIN class_students cs ON cs.class_id = sc.class_id
+    JOIN students s ON s.id = cs.student_id
+    WHERE s.id IN (${placeholders}) AND sc.status = 'active' AND sc.day_of_week = ?
+  `, [...studentIds, dow]).forEach(r => {
+    slots.push({ type: 'schedule', student_id: r.id, student_no: r.student_no, student_name: r.name,
+      start: r.start_time, end: r.end_time, class_id: r.class_id });
+  });
+
+  const classFilterSQL = `mr.class_id IN (SELECT class_id FROM class_students WHERE student_id IN (${placeholders}))`;
+  let excl = '';
+  const reqParams = [...studentIds, date];
+  if (excludeRequestId) { reqParams.push(excludeRequestId); excl = ' AND mr.id != ?'; }
+  const studentBusyReqs = all(`
+    SELECT DISTINCT mr.id, mr.new_start_time, mr.new_end_time, mr.class_id, mr.student_ids
+    FROM makeup_requests mr
+    WHERE (${classFilterSQL} OR mr.student_ids IS NOT NULL)
+      AND mr.new_date = ?
+      AND mr.status IN ('pending','approved','resubmitted')
+      ${excl}
+  `, reqParams);
+
+  studentBusyReqs.forEach(r => {
+    const reqStudentIds = parseStudentIds(r.student_ids);
+    if (reqStudentIds.length > 0) {
+      reqStudentIds.forEach(sid => {
+        if (studentIds.includes(sid)) {
+          const st = get('SELECT id, student_no, name FROM students WHERE id = ?', [sid]);
+          if (st) slots.push({
+            type: 'request', request_id: r.id, student_id: sid, student_no: st.student_no, student_name: st.name,
+            start: r.new_start_time, end: r.new_end_time, class_id: r.class_id
+          });
+        }
+      });
+    } else {
+      const classStudents = getStudentsByClassId(r.class_id);
+      classStudents.forEach(st => {
+        if (studentIds.includes(st.id)) {
+          slots.push({
+            type: 'request', request_id: r.id, student_id: st.id, student_no: st.student_no, student_name: st.name,
+            start: r.new_start_time, end: r.new_end_time, class_id: r.class_id
+          });
+        }
+      });
+    }
+  });
+  return slots;
+}
+
+function checkAllTimeConflicts(opts) {
+  const {
+    teacherId, classroomId, studentIds, date, startTime, endTime, excludeRequestId, classId, newClassId
+  } = opts;
+
+  const conflicts = { teacher: [], classroom: [], student: [] };
+
+  if (teacherId && date && startTime && endTime) {
+    const tSlots = getTeacherScheduleBusySlots(teacherId, date, excludeRequestId);
+    tSlots.forEach(s => {
+      if (isTimeOverlap(startTime, endTime, s.start, s.end)) {
+        conflicts.teacher.push({ ...s, date, teacher_id: teacherId });
+      }
+    });
+  }
+
+  if (classroomId && date && startTime && endTime) {
+    const cSlots = getClassroomScheduleBusySlots(classroomId, date, excludeRequestId);
+    cSlots.forEach(s => {
+      if (isTimeOverlap(startTime, endTime, s.start, s.end)) {
+        conflicts.classroom.push({ ...s, date, classroom_id: classroomId });
+      }
+    });
+  }
+
+  const actualStudentIds = (studentIds && studentIds.length > 0) ? studentIds :
+    (classId ? getStudentsByClassId(newClassId || classId).map(s => s.id) : []);
+
+  if (actualStudentIds.length > 0 && date && startTime && endTime) {
+    const sSlots = getStudentBusySlots(actualStudentIds, date, excludeRequestId);
+    const seen = new Set();
+    sSlots.forEach(s => {
+      if (isTimeOverlap(startTime, endTime, s.start, s.end)) {
+        const key = `${s.student_id}|${s.start}|${s.end}|${s.type}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          conflicts.student.push({ ...s, date });
+        }
+      }
+    });
+  }
+
+  const total = conflicts.teacher.length + conflicts.classroom.length + conflicts.student.length;
+  return { has_conflict: total > 0, conflicts, total };
+}
+
+function addMakeupApproval(requestId, action, operatorId, operatorName, comment, details) {
+  const now = new Date().toISOString();
+  insertRun(
+    `INSERT INTO makeup_approvals (request_id, action, operator_id, operator_name, comment, details, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [requestId, action, operatorId, operatorName, comment,
+      details ? (typeof details === 'string' ? details : JSON.stringify(details)) : null, now]
+  );
+}
+
+function getMakeupApprovalsByRequestId(requestId) {
+  return all(`
+    SELECT ma.*, u.username AS operator_username
+    FROM makeup_approvals ma
+    LEFT JOIN users u ON ma.operator_id = u.id
+    WHERE ma.request_id = ?
+    ORDER BY ma.created_at ASC, ma.id ASC
+  `, [requestId]);
+}
+
+function getMakeupRequestById(id) {
+  const row = get(`
+    SELECT mr.*,
+      tc.name AS course_name,
+      tcl.name AS class_name, tcl.semester AS class_semester,
+      tu.name AS teacher_name,
+      ncl.name AS new_class_name,
+      ntu.name AS new_teacher_name,
+      ocr.name AS original_classroom_name,
+      ncr.name AS new_classroom_name
+    FROM makeup_requests mr
+    JOIN courses tc ON tc.id = mr.course_id
+    JOIN classes tcl ON tcl.id = mr.class_id
+    JOIN users tu ON tu.id = mr.teacher_id
+    LEFT JOIN classes ncl ON ncl.id = mr.new_class_id
+    LEFT JOIN users ntu ON ntu.id = mr.new_teacher_id
+    LEFT JOIN classrooms ocr ON ocr.id = mr.original_classroom_id
+    LEFT JOIN classrooms ncr ON ncr.id = mr.new_classroom_id
+    WHERE mr.id = ?
+  `, [id]);
+  if (!row) return null;
+  row.student_ids_parsed = parseStudentIds(row.student_ids);
+  row.approvals = getMakeupApprovalsByRequestId(id);
+  return row;
+}
+
+function getMakeupRequestsByFilters(filters = {}, currentUser) {
+  let sql = `
+    SELECT mr.*,
+      tc.name AS course_name,
+      tcl.name AS class_name, tcl.semester AS class_semester,
+      tu.name AS teacher_name,
+      ncl.name AS new_class_name,
+      ocr.name AS original_classroom_name,
+      ncr.name AS new_classroom_name,
+      (SELECT COUNT(*) FROM makeup_approvals ma WHERE ma.request_id = mr.id) AS approval_count
+    FROM makeup_requests mr
+    JOIN courses tc ON tc.id = mr.course_id
+    JOIN classes tcl ON tcl.id = mr.class_id
+    JOIN users tu ON tu.id = mr.teacher_id
+    LEFT JOIN classes ncl ON ncl.id = mr.new_class_id
+    LEFT JOIN classrooms ocr ON ocr.id = mr.original_classroom_id
+    LEFT JOIN classrooms ncr ON ncr.id = mr.new_classroom_id
+    WHERE 1=1
+  `;
+  const params = [];
+
+  if (currentUser && currentUser.role === 'teacher') {
+    sql += ' AND mr.teacher_id = ?';
+    params.push(currentUser.id);
+  }
+
+  if (filters.status) {
+    sql += ' AND mr.status = ?';
+    params.push(filters.status);
+  }
+  if (filters.type) {
+    sql += ' AND mr.type = ?';
+    params.push(filters.type);
+  }
+  if (filters.teacher_id) {
+    sql += ' AND mr.teacher_id = ?';
+    params.push(parseInt(filters.teacher_id));
+  }
+  if (filters.course_id) {
+    sql += ' AND mr.course_id = ?';
+    params.push(parseInt(filters.course_id));
+  }
+  if (filters.class_id) {
+    sql += ' AND mr.class_id = ?';
+    params.push(parseInt(filters.class_id));
+  }
+  if (filters.request_no) {
+    sql += ' AND mr.request_no LIKE ?';
+    params.push(`%${filters.request_no}%`);
+  }
+  if (filters.date_start) {
+    sql += ' AND COALESCE(mr.new_date, mr.original_date) >= ?';
+    params.push(filters.date_start);
+  }
+  if (filters.date_end) {
+    sql += ' AND COALESCE(mr.new_date, mr.original_date) <= ?';
+    params.push(filters.date_end);
+  }
+
+  sql += ' ORDER BY mr.created_at DESC, mr.id DESC LIMIT 500';
+
+  const rows = all(sql, params);
+  rows.forEach(r => {
+    r.student_ids_parsed = parseStudentIds(r.student_ids);
+  });
+  return rows;
+}
+
+function writeBackHours(requestId, operatorId, operatorName) {
+  const req = getMakeupRequestById(requestId);
+  if (!req) return { ok: false, error: '申请不存在' };
+  if (req.hours_written_back) return { ok: false, error: '该申请已完成课时回写' };
+
+  const now = new Date().toISOString();
+  const scheduleId = req.original_schedule_id;
+  let originalHours = 0;
+  if (scheduleId) {
+    const s = get('SELECT hours_per_session FROM course_schedules WHERE id = ?', [scheduleId]);
+    if (s) originalHours = s.hours_per_session;
+  }
+  const delta = (req.hours || 0) - originalHours;
+
+  insertRun(
+    `INSERT INTO makeup_hours_writeback (request_id, schedule_id, original_hours, delta_hours, new_hours, operator_id, operator_name, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [requestId, scheduleId, originalHours, delta, req.hours || 0, operatorId, operatorName, now]
+  );
+
+  run('UPDATE makeup_requests SET hours_written_back = 1, updated_at = ? WHERE id = ?', [now, requestId]);
+
+  addMakeupApproval(requestId, 'writeback', operatorId, operatorName,
+    `课时回写: 原${originalHours}课时, 新${req.hours || 0}课时, 差异${delta >= 0 ? '+' : ''}${delta}`,
+    { original_hours: originalHours, new_hours: req.hours || 0, delta_hours: delta });
+
+  addLog('makeup_writeback_hours', operatorId, operatorName, {
+    request_id: requestId, request_no: req.request_no,
+    original_hours: originalHours, new_hours: req.hours || 0, delta_hours: delta
+  });
+
+  return { ok: true, original_hours: originalHours, new_hours: req.hours || 0, delta_hours: delta };
+}
+
+function getMakeupWritebackByRequestId(requestId) {
+  return all(`
+    SELECT mhw.*, u.username AS operator_username
+    FROM makeup_hours_writeback mhw
+    LEFT JOIN users u ON mhw.operator_id = u.id
+    WHERE mhw.request_id = ?
+    ORDER BY mhw.created_at ASC
+  `, [requestId]);
+}
+
+function getMakeupStats(currentUser) {
+  const base = currentUser && currentUser.role === 'teacher'
+    ? ' WHERE teacher_id = ' + currentUser.id : '';
+  const rows = all(`SELECT status, COUNT(*) AS cnt FROM makeup_requests${base} GROUP BY status`);
+  const typeRows = all(`SELECT type, COUNT(*) AS cnt FROM makeup_requests${base} GROUP BY type`);
+  const stats = {
+    total: 0, pending: 0, approved: 0, rejected: 0, cancelled: 0, revoked: 0, resubmitted: 0, completed: 0,
+    by_type: { makeup: 0, swap_class: 0, reschedule: 0 }
+  };
+  rows.forEach(r => { stats[r.status] = r.cnt; stats.total += r.cnt; });
+  typeRows.forEach(r => { stats.by_type[r.type] = r.cnt; });
+  return stats;
+}
+
+function getClassrooms() {
+  return all('SELECT * FROM classrooms ORDER BY id');
+}
+
+function getStudents(query) {
+  let sql = 'SELECT * FROM students';
+  const params = [];
+  if (query) {
+    sql += ' WHERE name LIKE ? OR student_no LIKE ?';
+    params.push(`%${query}%`, `%${query}%`);
+  }
+  sql += ' ORDER BY student_no LIMIT 200';
+  return all(sql, params);
+}
+
+function getSchedulesByClassId(classId) {
+  return all(`
+    SELECT cs.*, c.name AS classroom_name, u.name AS teacher_name
+    FROM course_schedules cs
+    LEFT JOIN classrooms c ON c.id = cs.classroom_id
+    LEFT JOIN users u ON u.id = cs.teacher_id
+    WHERE cs.class_id = ? AND cs.status = 'active'
+    ORDER BY cs.day_of_week, cs.start_time
+  `, [classId]);
+}
+
+function getSchedulesByTeacherId(teacherId) {
+  return all(`
+    SELECT cs.*, c.name AS classroom_name, cl.name AS class_name
+    FROM course_schedules cs
+    LEFT JOIN classrooms c ON c.id = cs.classroom_id
+    LEFT JOIN classes cl ON cl.id = cs.class_id
+    WHERE cs.teacher_id = ? AND cs.status = 'active'
+    ORDER BY cs.day_of_week, cs.start_time
+  `, [teacherId]);
+}
+
 module.exports = {
   initDatabase,
   run,
@@ -856,5 +1550,27 @@ module.exports = {
   invalidateExportsBySettlementId,
   getLedgerExports,
   getLedgerExportById,
-  getLedgerSummary
+  getLedgerSummary,
+  generateMakeupRequestNo,
+  dateToDayOfWeek,
+  timeToMinutes,
+  isTimeOverlap,
+  parseStudentIds,
+  serializeStudentIds,
+  getStudentsByClassId,
+  getClassroomScheduleBusySlots,
+  getTeacherScheduleBusySlots,
+  getStudentBusySlots,
+  checkAllTimeConflicts,
+  addMakeupApproval,
+  getMakeupApprovalsByRequestId,
+  getMakeupRequestById,
+  getMakeupRequestsByFilters,
+  writeBackHours,
+  getMakeupWritebackByRequestId,
+  getMakeupStats,
+  getClassrooms,
+  getStudents,
+  getSchedulesByClassId,
+  getSchedulesByTeacherId
 };

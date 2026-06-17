@@ -66,6 +66,7 @@ async function loadPage(name) {
     else if (name === 'reservations') await loadReservations();
     else if (name === 'loss-reports') await loadLossReports();
     else if (name === 'settlements') await loadSettlements();
+    else if (name === 'makeup-center') await loadMakeupCenter();
     else if (name === 'export-history') await loadExportHistory();
     else if (name === 'ledger') await loadLedger();
     else if (name === 'logs') await loadLogs();
@@ -1058,6 +1059,648 @@ function showMainPage() {
 document.getElementById('modal-overlay').onclick = (e) => {
   if (e.target === document.getElementById('modal-overlay')) closeModal();
 };
+
+const MAKEUP_STATUS_MAP = {
+  pending: '待审批', resubmitted: '重新提交待审', approved: '审批通过',
+  rejected: '已驳回', cancelled: '已取消', revoked: '已撤销', completed: '已完成'
+};
+const MAKEUP_STATUS_CLASS = {
+  pending: 'status-pending', resubmitted: 'status-pending', approved: 'status-approved',
+  rejected: 'status-rejected', cancelled: 'status-cancelled', revoked: 'status-rejected', completed: 'status-collected'
+};
+const MAKEUP_TYPE_MAP = { makeup: '补课', swap_class: '换班', reschedule: '调时间' };
+
+let currentMakeupTab = 'list';
+let makeupFilters = { status: '', type: '', teacher_id: '', course_id: '', class_id: '', request_no: '', date_start: '', date_end: '' };
+let makeupLogFilters = { action: '', user_id: '', keyword: '', date_start: '', date_end: '' };
+let makeupCache = { courses: [], classes: [], classrooms: [], students: [] };
+
+function switchMakeupTab(tab) {
+  currentMakeupTab = tab;
+  document.querySelectorAll('.makeup-tab').forEach(b => b.classList.toggle('active', b.dataset.mtab === tab));
+  document.querySelectorAll('.makeup-tab-panel').forEach(p => p.classList.remove('active'));
+  const panel = document.getElementById('makeup-tab-' + tab);
+  if (panel) panel.classList.add('active');
+  loadMakeupTab(tab);
+}
+
+async function loadMakeupCenter() {
+  document.querySelectorAll('.makeup-tab').forEach(btn => {
+    btn.onclick = () => switchMakeupTab(btn.dataset.mtab);
+  });
+
+  if (['admin', 'lab_manager'].includes(currentUser.role)) {
+    document.querySelectorAll('#page-makeup-center .nav-admin-only').forEach(el => { el.style.display = ''; });
+  } else {
+    document.querySelectorAll('#page-makeup-center .nav-admin-only').forEach(el => { el.style.display = 'none'; });
+  }
+
+  const [stats, courses, classes, classrooms, students] = await Promise.all([
+    api('GET', '/api/makeup/stats'),
+    api('GET', '/api/courses'),
+    api('GET', '/api/classes'),
+    api('GET', '/api/makeup/classrooms'),
+    api('GET', '/api/makeup/students')
+  ]);
+  makeupCache = { courses, classes, classrooms, students };
+
+  document.getElementById('makeup-stats').innerHTML = `
+    <div class="stat-card"><div class="stat-value">${stats.total || 0}</div><div class="stat-label">申请总数</div></div>
+    <div class="stat-card"><div class="stat-value" style="color:#f39c12">${(stats.pending || 0) + (stats.resubmitted || 0)}</div><div class="stat-label">待处理</div></div>
+    <div class="stat-card"><div class="stat-value" style="color:#27ae60">${stats.approved || 0}</div><div class="stat-label">已通过</div></div>
+    <div class="stat-card"><div class="stat-value" style="color:#e74c3c">${(stats.rejected || 0) + (stats.revoked || 0) + (stats.cancelled || 0)}</div><div class="stat-label">未通过</div></div>
+    <div class="stat-card"><div class="stat-value">${(stats.by_type || {}).makeup || 0}</div><div class="stat-label">补课申请</div></div>
+    <div class="stat-card"><div class="stat-value">${(stats.by_type || {}).swap_class || 0}</div><div class="stat-label">换班申请</div></div>
+    <div class="stat-card"><div class="stat-value">${(stats.by_type || {}).reschedule || 0}</div><div class="stat-label">调时间申请</div></div>
+  `;
+
+  switchMakeupTab(currentMakeupTab);
+}
+
+async function loadMakeupTab(tab) {
+  if (tab === 'list') await loadMakeupList();
+  else if (tab === 'submit') renderMakeupSubmitForm();
+  else if (tab === 'queue') await loadMakeupQueue();
+  else if (tab === 'logs') await loadMakeupLogs();
+}
+
+function escapeHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+}
+
+async function loadMakeupList() {
+  const filters = makeupFilters;
+  const params = new URLSearchParams();
+  Object.keys(filters).forEach(k => { if (filters[k]) params.append(k, filters[k]); });
+  const q = params.toString();
+  const list = await api('GET', `/api/makeup/requests${q ? '?' + q : ''}`);
+  const { courses, classes } = makeupCache;
+
+  const fb = document.getElementById('makeup-filters');
+  fb.innerHTML = `
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <select id="mf-status" style="padding:6px 8px;border:1px solid #ddd;border-radius:4px">
+        <option value="">全部状态</option>
+        ${Object.entries(MAKEUP_STATUS_MAP).map(([k,v]) => `<option value="${k}" ${filters.status===k?'selected':''}>${v}</option>`).join('')}
+      </select>
+      <select id="mf-type" style="padding:6px 8px;border:1px solid #ddd;border-radius:4px">
+        <option value="">全部类型</option>
+        ${Object.entries(MAKEUP_TYPE_MAP).map(([k,v]) => `<option value="${k}" ${filters.type===k?'selected':''}>${v}</option>`).join('')}
+      </select>
+      <select id="mf-course" style="padding:6px 8px;border:1px solid #ddd;border-radius:4px">
+        <option value="">全部课程</option>
+        ${courses.map(c => `<option value="${c.id}" ${String(filters.course_id)===String(c.id)?'selected':''}>${c.name}</option>`).join('')}
+      </select>
+      <select id="mf-class" style="padding:6px 8px;border:1px solid #ddd;border-radius:4px">
+        <option value="">全部班级</option>
+        ${classes.map(cl => `<option value="${cl.id}" ${String(filters.class_id)===String(cl.id)?'selected':''}>${cl.name}</option>`).join('')}
+      </select>
+      <input type="text" id="mf-no" placeholder="申请单号..." value="${filters.request_no||''}" style="width:140px;padding:6px 8px;border:1px solid #ddd;border-radius:4px">
+      <input type="date" id="mf-ds" value="${filters.date_start||''}" style="padding:6px 8px;border:1px solid #ddd;border-radius:4px">
+      ~
+      <input type="date" id="mf-de" value="${filters.date_end||''}" style="padding:6px 8px;border:1px solid #ddd;border-radius:4px">
+      <button class="btn btn-primary" onclick="applyMakeupFilters()">🔍 筛选</button>
+      <button class="btn" style="background:#eee;color:#555" onclick="resetMakeupFilters()">重置</button>
+      <button class="btn btn-success" onclick="exportMakeupCsv()" style="margin-left:auto">📊 导出CSV</button>
+      ${['admin','lab_manager'].includes(currentUser.role) ? '<button class="btn btn-info" onclick="showMakeupImportModal()">📤 导入JSON恢复</button>' : ''}
+    </div>
+  `;
+
+  if (list.length === 0) {
+    document.getElementById('makeup-list').innerHTML = '<div class="empty-state">暂无申请记录</div>';
+    return;
+  }
+
+  let h = '<table class="data-table"><thead><tr><th>单号</th><th>类型</th><th>课程</th><th>班级</th><th>申请人</th><th>新日期/时间/教室</th><th>课时</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+  list.forEach(r => {
+    const newInfo = r.new_date ? `${r.new_date || ''} ${r.new_start_time || ''}-${r.new_end_time || ''}<br>${r.new_classroom_name || (r.new_class_id ? r.new_class_name : '') || ''}`
+      : (r.new_class_name ? `换班至: ${r.new_class_name}` : '-');
+    h += `<tr>
+      <td><a href="#" onclick="showMakeupDetail(${r.id});return false">${escapeHtml(r.request_no)}</a></td>
+      <td>${MAKEUP_TYPE_MAP[r.type] || r.type}</td>
+      <td>${escapeHtml(r.course_name)}</td>
+      <td>${escapeHtml(r.class_name)}${r.new_class_name && r.new_class_name !== r.class_name ? ' → ' + escapeHtml(r.new_class_name) : ''}</td>
+      <td>${escapeHtml(r.teacher_name)}</td>
+      <td style="font-size:12px">${newInfo}</td>
+      <td>${r.hours}</td>
+      <td><span class="status-badge ${MAKEUP_STATUS_CLASS[r.status]}">${MAKEUP_STATUS_MAP[r.status] || r.status}</span></td>
+      <td class="action-cell">
+        <button class="btn btn-xs btn-info" onclick="showMakeupDetail(${r.id})">详情</button>
+      </td>
+    </tr>`;
+  });
+  h += '</tbody></table>';
+  document.getElementById('makeup-list').innerHTML = h;
+}
+
+function applyMakeupFilters() {
+  makeupFilters = {
+    status: document.getElementById('mf-status').value,
+    type: document.getElementById('mf-type').value,
+    course_id: document.getElementById('mf-course').value,
+    class_id: document.getElementById('mf-class').value,
+    request_no: document.getElementById('mf-no').value.trim(),
+    date_start: document.getElementById('mf-ds').value,
+    date_end: document.getElementById('mf-de').value,
+    teacher_id: ''
+  };
+  loadMakeupList();
+}
+
+function resetMakeupFilters() {
+  makeupFilters = { status: '', type: '', teacher_id: '', course_id: '', class_id: '', request_no: '', date_start: '', date_end: '' };
+  loadMakeupList();
+}
+
+async function exportMakeupCsv() {
+  const params = new URLSearchParams();
+  Object.keys(makeupFilters).forEach(k => { if (makeupFilters[k]) params.append(k, makeupFilters[k]); });
+  const q = params.toString();
+  try {
+    const res = await fetch(`/api/makeup/export/csv${q ? '?' + q : ''}`, { credentials: 'include' });
+    if (!res.ok) throw new Error('导出失败');
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const disp = res.headers.get('Content-Disposition');
+    a.download = disp && disp.includes('filename=') ? disp.split('filename=')[1].replace(/"/g, '') : `makeup-requests.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    toast('导出成功');
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+function showMakeupImportModal() {
+  let h = '<div class="form-group"><label>选择补课/调课申请 JSON 文件</label>';
+  h += '<input type="file" id="makeup-import-file" accept=".json,application/json" required>';
+  h += '<p class="form-hint">支持数组或 {"requests":[...]} 结构。重复单号会自动跳过，冲突时间不导入，缺失字段会跳过并记录。</p>';
+  h += '</div>';
+  h += `<div style="margin-top:16px;display:flex;gap:8px">`;
+  h += `<button id="mk-imp-confirm" class="btn btn-primary" style="flex:1">开始导入</button>`;
+  h += `<button id="mk-imp-cancel" class="btn" style="flex:1;background:#eee;color:#555">取消</button>`;
+  h += `</div>`;
+  showModal('导入历史申请（恢复）', h);
+  document.getElementById('mk-imp-cancel').onclick = closeModal;
+  document.getElementById('mk-imp-confirm').onclick = async () => {
+    const file = document.getElementById('makeup-import-file').files[0];
+    if (!file) { toast('请先选择文件', 'warn'); return; }
+    const btn = document.getElementById('mk-imp-confirm');
+    btn.disabled = true; btn.textContent = '导入中...';
+    try {
+      const text = await file.text();
+      let data; try { data = JSON.parse(text); } catch(e) { throw new Error('JSON 解析失败'); }
+      const r = await api('POST', '/api/makeup/import/json', data);
+      closeModal();
+      const msg = `导入完成: 成功${r.imported}条, 跳过${r.skipped}条(重复${r.duplicates}/冲突${r.conflicts}), 失败${r.failed}条`;
+      toast(msg, r.imported > 0 ? 'info' : 'warn');
+      loadMakeupCenter();
+    } catch(e) {
+      btn.disabled = false; btn.textContent = '开始导入';
+      toast(e.message, 'error');
+    }
+  };
+}
+
+function renderMakeupSubmitForm() {
+  const { courses, classes, classrooms } = makeupCache;
+  const myCourses = currentUser.role === 'teacher' ? courses.filter(c => c.teacher_id === currentUser.id) : courses;
+
+  let h = '';
+  h += '<form id="makeup-submit-form" style="display:grid;grid-template-columns:1fr 1fr;gap:16px">';
+  h += `<div class="form-group"><label>申请类型 *</label>
+    <select id="mk-type" required onchange="updateMakeupFormVisibility()">
+      <option value="makeup">补课（指定新日期时间）</option>
+      <option value="swap_class">换班（转到其他班级）</option>
+      <option value="reschedule">调时间（同班级调时间）</option>
+    </select></div>`;
+  h += `<div class="form-group"><label>课程 *</label>
+    <select id="mk-course" required onchange="refreshClassOptions()">
+      ${myCourses.map(c => `<option value="${c.id}" data-teacher="${c.teacher_id}">${c.name}</option>`).join('')}
+    </select></div>`;
+  h += `<div class="form-group"><label>原班级 *</label><select id="mk-class" required></select></div>`;
+  h += `<div class="form-group"><label>课时 *</label><input type="number" id="mk-hours" min="0.5" step="0.5" value="2" required></div>`;
+  h += `<div class="form-group makeup-original-fields"><label>原排课日期</label><input type="date" id="mk-odate"></div>`;
+  h += `<div class="form-group makeup-original-fields"><label>原排课时段</label>
+    <div style="display:flex;gap:8px"><input type="time" id="mk-ostart" style="flex:1"> ~ <input type="time" id="mk-oend" style="flex:1"></div></div>`;
+  h += `<div class="form-group makeup-original-fields"><label>原教室</label>
+    <select id="mk-oclassroom"><option value="">--</option>${classrooms.map(c => `<option value="${c.id}">${c.name}</option>`).join('')}</select></div>`;
+  h += `<div class="form-group makeup-target-classroom"><label>新教室</label>
+    <select id="mk-nclassroom"><option value="">--</option>${classrooms.map(c => `<option value="${c.id}">${c.name}</option>`).join('')}</select></div>`;
+  h += `<div class="form-group makeup-target-date"><label>新日期 *</label><input type="date" id="mk-ndate"></div>`;
+  h += `<div class="form-group makeup-target-date"><label>新时段 *</label>
+    <div style="display:flex;gap:8px"><input type="time" id="mk-nstart" style="flex:1" value="08:00"> ~ <input type="time" id="mk-nend" style="flex:1" value="10:00"></div></div>`;
+  h += `<div class="form-group makeup-target-class"><label>目标班级 *</label><select id="mk-nclass"></select></div>`;
+  h += `<div class="form-group"><label>指定学员（留空=全班）</label>
+    <select id="mk-students" multiple size="4" style="min-height:80px"></select>
+    <p class="form-hint">Windows按住Ctrl、Mac按住Cmd多选</p></div>`;
+  h += `<div class="form-group" style="grid-column:1/-1"><label>申请原因 *</label><textarea id="mk-reason" rows="3" required placeholder="请说明补课/换班/调时间的具体原因..."></textarea></div>`;
+  h += `<div id="mk-conflict-hint" style="grid-column:1/-1;display:none" class="conflict-box"></div>`;
+  h += `<div style="grid-column:1/-1;display:flex;gap:8px">
+    <button type="button" class="btn btn-secondary" onclick="precheckMakeupConflicts()">🔍 预检冲突</button>
+    <button type="submit" class="btn btn-primary" style="flex:1">提交申请</button>
+    <button type="reset" class="btn" style="background:#eee;color:#555">重置表单</button>
+  </div>`;
+  h += '</form>';
+
+  document.getElementById('makeup-submit-form').innerHTML = h;
+  refreshClassOptions();
+  updateMakeupFormVisibility();
+
+  document.getElementById('mk-class').onchange = refreshStudentOptions;
+
+  document.getElementById('makeup-submit-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const type = document.getElementById('mk-type').value;
+    const courseId = parseInt(document.getElementById('mk-course').value);
+    const classId = parseInt(document.getElementById('mk-class').value);
+    const studentSel = document.getElementById('mk-students');
+    const studentIds = Array.from(studentSel.selectedOptions).map(o => parseInt(o.value));
+    const body = {
+      type, course_id: courseId, class_id: classId,
+      student_ids: studentIds.length > 0 ? studentIds : null,
+      hours: parseFloat(document.getElementById('mk-hours').value),
+      reason: document.getElementById('mk-reason').value.trim(),
+      original_date: document.getElementById('mk-odate').value || null,
+      original_start_time: document.getElementById('mk-ostart').value || null,
+      original_end_time: document.getElementById('mk-oend').value || null,
+      original_classroom_id: document.getElementById('mk-oclassroom').value ? parseInt(document.getElementById('mk-oclassroom').value) : null,
+      new_date: document.getElementById('mk-ndate').value || null,
+      new_start_time: document.getElementById('mk-nstart').value || null,
+      new_end_time: document.getElementById('mk-nend').value || null,
+      new_classroom_id: document.getElementById('mk-nclassroom').value ? parseInt(document.getElementById('mk-nclassroom').value) : null,
+      new_class_id: document.getElementById('mk-nclass').value ? parseInt(document.getElementById('mk-nclass').value) : null
+    };
+    try {
+      const r = await api('POST', '/api/makeup/requests', body);
+      toast(`申请已提交，单号 ${r.request_no}`);
+      switchMakeupTab('list');
+    } catch (err) {
+      if (err.message.includes('时间冲突') && err.conflicts) {
+        renderConflictBox(err.conflicts);
+      } else {
+        toast(err.message, 'error');
+      }
+    }
+  };
+}
+
+function updateMakeupFormVisibility() {
+  const t = document.getElementById('mk-type').value;
+  const needDate = ['makeup', 'reschedule'].includes(t);
+  const needClass = t === 'swap_class';
+  document.querySelectorAll('.makeup-target-date').forEach(el => el.style.display = needDate ? '' : 'none');
+  document.querySelectorAll('.makeup-target-class').forEach(el => el.style.display = needClass ? '' : 'none');
+  document.querySelectorAll('.makeup-target-classroom').forEach(el => el.style.display = needDate ? '' : 'none');
+  if (needClass) { const nc = document.getElementById('mk-nclass'); if (nc && nc.options.length === 0) refreshTargetClassOptions(); }
+}
+
+function refreshClassOptions() {
+  const cid = parseInt(document.getElementById('mk-course').value);
+  const sel = document.getElementById('mk-class');
+  sel.innerHTML = makeupCache.classes.filter(c => c.course_id === cid).map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+  refreshTargetClassOptions();
+  refreshStudentOptions();
+}
+
+function refreshTargetClassOptions() {
+  const cid = parseInt(document.getElementById('mk-course').value);
+  const sel = document.getElementById('mk-nclass');
+  if (!sel) return;
+  sel.innerHTML = makeupCache.classes.filter(c => c.course_id === cid).map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+}
+
+async function refreshStudentOptions() {
+  const classId = parseInt(document.getElementById('mk-class').value);
+  const sel = document.getElementById('mk-students');
+  if (!sel || !classId) return;
+  try {
+    const list = await api('GET', `/api/makeup/students-by-class/${classId}`);
+    sel.innerHTML = list.map(s => `<option value="${s.id}">${s.student_no} - ${s.name}</option>`).join('');
+  } catch(e) {}
+}
+
+async function precheckMakeupConflicts() {
+  const t = document.getElementById('mk-type').value;
+  const classId = parseInt(document.getElementById('mk-class').value);
+  const courseSel = document.getElementById('mk-course');
+  const teacherId = parseInt(courseSel.selectedOptions[0]?.dataset.teacher || currentUser.id);
+  const studentSel = document.getElementById('mk-students');
+  const studentIds = Array.from(studentSel.selectedOptions).map(o => parseInt(o.value));
+  const needDate = ['makeup', 'reschedule'].includes(t);
+  const date = needDate ? document.getElementById('mk-ndate').value : null;
+  const start = needDate ? document.getElementById('mk-nstart').value : null;
+  const end = needDate ? document.getElementById('mk-nend').value : null;
+  const classroomId = document.getElementById('mk-nclassroom').value ? parseInt(document.getElementById('mk-nclassroom').value) : null;
+  const nClassId = t === 'swap_class' ? parseInt(document.getElementById('mk-nclass').value) : null;
+  if (needDate && (!date || !start || !end)) { toast('请先填写新日期和时段', 'warn'); return; }
+  try {
+    const r = await api('POST', '/api/makeup/check-conflicts', {
+      teacher_id: teacherId, classroom_id: classroomId, student_ids: studentIds,
+      date, start_time: start, end_time: end,
+      class_id: classId, new_class_id: nClassId
+    });
+    if (r.has_conflict) renderConflictBox(r.conflicts);
+    else {
+      const box = document.getElementById('mk-conflict-hint');
+      box.style.display = 'block';
+      box.className = 'conflict-box conflict-ok';
+      box.innerHTML = '✅ 未检测到教师/教室/学员时间冲突，可以提交。';
+    }
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+function renderConflictBox(conflicts) {
+  const box = document.getElementById('mk-conflict-hint');
+  box.style.display = 'block';
+  box.className = 'conflict-box conflict-error';
+  let h = '⚠️ 检测到时间冲突：<ul style="margin:8px 0 0 0;padding-left:20px">';
+  if (conflicts.teacher && conflicts.teacher.length) {
+    h += '<li><strong>教师时间冲突:</strong><ul style="padding-left:20px">';
+    conflicts.teacher.forEach(c => h += `<li>${c.date} ${c.start}-${c.end} (来源:${c.type==='schedule'?'固定课表':'其他申请'}${c.class_id?` class#${c.class_id}`:''})</li>`);
+    h += '</ul></li>';
+  }
+  if (conflicts.classroom && conflicts.classroom.length) {
+    h += '<li><strong>教室占用冲突:</strong><ul style="padding-left:20px">';
+    conflicts.classroom.forEach(c => h += `<li>${c.date} ${c.start}-${c.end} (${c.type==='schedule'?'固定课表':'其他申请'})</li>`);
+    h += '</ul></li>';
+  }
+  if (conflicts.student && conflicts.student.length) {
+    h += '<li><strong>学员时间冲突:</strong><ul style="padding-left:20px">';
+    const seen = new Set();
+    conflicts.student.forEach(c => {
+      const k = `${c.student_id}|${c.date}|${c.start}|${c.end}`;
+      if (seen.has(k)) return; seen.add(k);
+      h += `<li>${c.student_name||('学员#'+c.student_id)} (${c.student_no||''}) ${c.date} ${c.start}-${c.end} (${c.type==='schedule'?'固定课表':'其他申请'})</li>`;
+    });
+    h += '</ul></li>';
+  }
+  h += '</ul>';
+  box.innerHTML = h;
+}
+
+async function loadMakeupQueue() {
+  const list = await api('GET', '/api/makeup/queue/pending');
+  if (list.length === 0) {
+    document.getElementById('makeup-queue').innerHTML = '<div class="empty-state">✅ 太棒了！当前没有待处理的申请</div>';
+    return;
+  }
+  let h = '<table class="data-table"><thead><tr><th>单号</th><th>类型</th><th>申请人</th><th>课程/班级</th><th>安排</th><th>提交时间</th><th>操作</th></tr></thead><tbody>';
+  list.forEach(r => {
+    h += `<tr>
+      <td><a href="#" onclick="showMakeupDetail(${r.id});return false">${escapeHtml(r.request_no)}</a></td>
+      <td>${MAKEUP_TYPE_MAP[r.type] || r.type} <span class="status-badge ${MAKEUP_STATUS_CLASS[r.status]}">${MAKEUP_STATUS_MAP[r.status]||r.status}</span></td>
+      <td>${escapeHtml(r.teacher_name)}</td>
+      <td>${escapeHtml(r.course_name)} / ${escapeHtml(r.class_name)}${r.new_class_name ? ' → ' + escapeHtml(r.new_class_name) : ''}</td>
+      <td style="font-size:12px">${r.new_date?r.new_date+' '+r.new_start_time+'-'+r.new_end_time:''}<br>${r.new_classroom_name||''}</td>
+      <td class="log-time">${new Date(r.created_at).toLocaleString()}</td>
+      <td class="action-cell">
+        <button class="btn btn-sm btn-success" onclick="quickApproveMakeup(${r.id})">通过</button>
+        <button class="btn btn-sm btn-danger" onclick="quickRejectMakeup(${r.id})">驳回</button>
+        <button class="btn btn-xs btn-info" onclick="showMakeupDetail(${r.id})">详情</button>
+      </td></tr>`;
+  });
+  h += '</tbody></table>';
+  document.getElementById('makeup-queue').innerHTML = h;
+}
+
+async function quickApproveMakeup(id) {
+  if (!confirm('确认通过该申请？')) return;
+  try {
+    await api('PUT', `/api/makeup/requests/${id}/approve`, { comment: '快速通过' });
+    toast('审批通过'); loadMakeupTab('queue'); loadMakeupList();
+    loadMakeupCenter();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+function quickRejectMakeup(id) { showRejectMakeupModal(id, true); }
+
+function showRejectMakeupModal(id, fromQueue) {
+  let h = `<form id="mk-reject-form">
+    <div class="form-group"><label>驳回原因 *</label>
+    <textarea id="mk-reject-reason" rows="4" required placeholder="请填写驳回原因，教师可以据此修改后重新提交..."></textarea></div>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button type="submit" class="btn btn-danger" style="flex:1">确认驳回</button>
+      <button type="button" class="btn" style="flex:1;background:#eee;color:#555" onclick="closeModal()">取消</button>
+    </div></form>`;
+  showModal('驳回申请', h);
+  document.getElementById('mk-reject-form').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api('PUT', `/api/makeup/requests/${id}/reject`, { reason: document.getElementById('mk-reject-reason').value.trim() });
+      closeModal(); toast('已驳回');
+      if (fromQueue) { loadMakeupTab('queue'); loadMakeupCenter(); }
+      else { showMakeupDetail(id); loadMakeupList(); }
+    } catch(err) { toast(err.message, 'error'); }
+  };
+}
+
+async function showMakeupDetail(id) {
+  const d = await api('GET', `/api/makeup/requests/${id}`);
+  const isOwner = currentUser.role === 'teacher' && d.teacher_id === currentUser.id;
+  const isAdmin = ['admin', 'lab_manager'].includes(currentUser.role);
+  let h = '';
+  h += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">
+    <div style="background:#f8f9fa;padding:12px;border-radius:6px;border:1px solid #e9ecef">
+      <div style="font-size:12px;color:#666;margin-bottom:4px">申请单号</div>
+      <div style="font-weight:bold">${escapeHtml(d.request_no)}</div>
+    </div>
+    <div style="background:#f8f9fa;padding:12px;border-radius:6px;border:1px solid #e9ecef">
+      <div style="font-size:12px;color:#666;margin-bottom:4px">类型 / 状态</div>
+      <div style="font-weight:bold">${MAKEUP_TYPE_MAP[d.type]} / <span class="status-badge ${MAKEUP_STATUS_CLASS[d.status]}">${MAKEUP_STATUS_MAP[d.status]}</span></div>
+    </div>
+  </div>`;
+
+  h += '<table class="data-table compact" style="margin-bottom:16px"><tbody>';
+  h += `<tr><th style="width:120px">申请人</th><td>${escapeHtml(d.teacher_name)} (ID: ${d.teacher_id})</td></tr>`;
+  h += `<tr><th>课程 / 班级</th><td>${escapeHtml(d.course_name)} / ${escapeHtml(d.class_name)}</td></tr>`;
+  h += `<tr><th>原安排</th><td>${d.original_date||''} ${d.original_start_time||''}-${d.original_end_time||''} ${d.original_classroom_name?'@ '+escapeHtml(d.original_classroom_name):''}</td></tr>`;
+  h += `<tr><th>新安排</th><td>${d.new_date?d.new_date+' '+d.new_start_time+'-'+d.new_end_time:''} ${d.new_classroom_name?'@ '+escapeHtml(d.new_classroom_name):''} ${d.new_class_name?'→ 班级: '+escapeHtml(d.new_class_name):''} ${d.new_teacher_name?'/ 代课: '+escapeHtml(d.new_teacher_name):''}</td></tr>`;
+  h += `<tr><th>课时</th><td>${d.hours} 课时${d.hours_written_back?' <span style="color:#27ae60">(已回写)</span>':''}</td></tr>`;
+  const stuText = (d.student_ids_parsed && d.student_ids_parsed.length) ? `指定${d.student_ids_parsed.length}人` : '全班学员';
+  h += `<tr><th>学员范围</th><td>${stuText}</td></tr>`;
+  h += `<tr><th>申请原因</th><td>${escapeHtml(d.reason)}</td></tr>`;
+  if (d.approval_comment) h += `<tr><th>审批意见</th><td style="color:#1e8449">${escapeHtml(d.approval_comment)}${d.approved_at?' <span style="color:#999;font-size:12px">'+new Date(d.approved_at).toLocaleString()+'</span>':''}</td></tr>`;
+  if (d.reject_reason) h += `<tr><th>驳回原因</th><td style="color:#c0392b">${escapeHtml(d.reject_reason)}${d.rejected_at?' <span style="color:#999;font-size:12px">'+new Date(d.rejected_at).toLocaleString()+'</span>':''}</td></tr>`;
+  if (d.revoke_reason) h += `<tr><th>撤销原因</th><td style="color:#d35400">${escapeHtml(d.revoke_reason)}${d.revoked_at?' <span style="color:#999;font-size:12px">'+new Date(d.revoked_at).toLocaleString()+'</span>':''}</td></tr>`;
+  h += `<tr><th>提交时间</th><td>${new Date(d.created_at).toLocaleString()}${d.resubmitted_count?` <span style="color:#999">(第${d.resubmitted_count}次重提)`:''}</td></tr>`;
+  h += '</tbody></table>';
+
+  if (d.writebacks && d.writebacks.length) {
+    h += '<h4 style="margin:16px 0 8px">课时回写记录</h4>';
+    h += '<table class="data-table compact"><thead><tr><th>时间</th><th>原课时</th><th>差异</th><th>新课时</th><th>操作人</th></tr></thead><tbody>';
+    d.writebacks.forEach(w => {
+      h += `<tr><td>${new Date(w.created_at).toLocaleString()}</td><td>${w.original_hours}</td><td style="color:${w.delta_hours>=0?'#27ae60':'#c0392b'}">${w.delta_hours>=0?'+':''}${w.delta_hours}</td><td>${w.new_hours}</td><td>${escapeHtml(w.operator_name||'')}</td></tr>`;
+    });
+    h += '</tbody></table>';
+  }
+
+  if (d.approvals && d.approvals.length) {
+    h += '<h4 style="margin:16px 0 8px">操作追溯（审批链）</h4>';
+    h += '<table class="data-table compact"><thead><tr><th>时间</th><th>动作</th><th>操作人</th><th>备注</th></tr></thead><tbody>';
+    const actMap = { submit: '提交', approve: '审批通过', reject: '驳回', revoke: '撤销审批', cancel: '取消申请', resubmit: '重新提交', writeback: '课时回写', import: '导入恢复' };
+    d.approvals.forEach(a => {
+      h += `<tr><td>${new Date(a.created_at).toLocaleString()}</td><td>${actMap[a.action]||a.action}</td><td>${escapeHtml(a.operator_name||'')}</td><td>${escapeHtml(a.comment||'')}</td></tr>`;
+    });
+    h += '</tbody></table>';
+  }
+
+  h += '<div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap">';
+  if (isAdmin && ['pending', 'resubmitted'].includes(d.status)) {
+    h += `<button class="btn btn-success" onclick="quickApproveMakeup(${d.id})">✅ 审批通过</button>`;
+    h += `<button class="btn btn-danger" onclick="showRejectMakeupModal(${d.id})">❌ 驳回</button>`;
+  }
+  if (isAdmin && d.status === 'approved' && !d.hours_written_back) {
+    h += `<button class="btn btn-info" onclick="doWritebackHours(${d.id})">💾 课时回写</button>`;
+  }
+  if (isAdmin && d.status === 'approved') {
+    h += `<button class="btn btn-warning" onclick="showRevokeMakeupModal(${d.id})">↩️ 撤销审批</button>`;
+  }
+  if (['pending', 'resubmitted'].includes(d.status) && isOwner) {
+    h += `<button class="btn" style="background:#95a5a6;color:#fff" onclick="cancelMakeup(${d.id})">取消申请</button>`;
+  }
+  if (d.status === 'approved' && isAdmin) {
+    h += `<button class="btn" style="background:#95a5a6;color:#fff" onclick="cancelMakeup(${d.id})">管理员取消</button>`;
+  }
+  if (['rejected', 'revoked', 'cancelled'].includes(d.status) && (isOwner || isAdmin)) {
+    h += `<button class="btn btn-primary" onclick="showResubmitMakeupModal(${d.id})">🔁 重新提交</button>`;
+  }
+  h += '</div>';
+
+  showModal(`申请详情 #${d.id} ${d.request_no}`, h);
+}
+
+async function doWritebackHours(id) {
+  if (!confirm('确认执行课时回写？回写后不可撤销。')) return;
+  try {
+    const r = await api('PUT', `/api/makeup/requests/${id}/writeback-hours`);
+    toast(`回写成功：原${r.writeback.original_hours} → 新${r.writeback.new_hours} (${r.writeback.delta_hours>=0?'+':''}${r.writeback.delta_hours})`);
+    showMakeupDetail(id); loadMakeupCenter();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+function showRevokeMakeupModal(id) {
+  let h = `<form id="mk-revoke-form"><div class="form-group"><label>撤销原因 *</label>
+    <textarea id="mk-revoke-reason" rows="4" required placeholder="说明撤销审批的原因..."></textarea></div>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button type="submit" class="btn btn-warning" style="flex:1">确认撤销</button>
+      <button type="button" class="btn" style="flex:1;background:#eee;color:#555" onclick="closeModal()">取消</button>
+    </div></form>`;
+  showModal('撤销已通过的审批', h);
+  document.getElementById('mk-revoke-form').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api('PUT', `/api/makeup/requests/${id}/revoke`, { reason: document.getElementById('mk-revoke-reason').value.trim() });
+      closeModal(); toast('已撤销审批'); showMakeupDetail(id); loadMakeupCenter();
+    } catch(err) { toast(err.message, 'error'); }
+  };
+}
+
+async function cancelMakeup(id) {
+  const reason = prompt('请输入取消原因（可选）：') || '';
+  try {
+    await api('PUT', `/api/makeup/requests/${id}/cancel`, { reason });
+    closeModal(); toast('申请已取消'); loadMakeupCenter();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+function showResubmitMakeupModal(id) {
+  const html = `<div style="background:#fff8e1;border:1px solid #ffe082;padding:12px;border-radius:6px;margin-bottom:12px">
+    💡 重新提交会创建新的申请单（关联原单），你可以修改日期/时间/教室/班级/学员等信息。
+    若不修改，系统会沿用原单内容；若原冲突未解决，系统会再次拦截。
+  </div>
+  <form id="mk-resubmit-form">
+    <div class="form-group"><label>修改申请原因（可选，不填则沿用）</label>
+      <textarea id="mk-resubmit-reason" rows="3" placeholder="如需修改申请原因请填写..."></textarea></div>
+    <div class="form-group"><label>提交说明（本次为何重提）</label>
+      <textarea id="mk-resubmit-submit" rows="2" placeholder="说明修改了什么..."></textarea></div>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button type="submit" class="btn btn-primary" style="flex:1">直接重提（沿用原信息）</button>
+      <button type="button" class="btn" style="flex:1;background:#eee;color:#555" onclick="closeModal()">取消</button>
+    </div>
+  </form>`;
+  showModal('重新提交申请', html);
+  document.getElementById('mk-resubmit-form').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const body = {};
+      const reason = document.getElementById('mk-resubmit-reason').value.trim();
+      const sr = document.getElementById('mk-resubmit-submit').value.trim();
+      if (reason) body.reason = reason;
+      if (sr) body.submit_reason = sr;
+      const r = await api('POST', `/api/makeup/requests/${id}/resubmit`, body);
+      closeModal(); toast(`重新提交成功，新单号 ${r.request_no}`);
+      switchMakeupTab('list'); loadMakeupCenter();
+    } catch (err) {
+      if (err.message && err.message.includes('时间冲突')) toast('仍有时间冲突，请在列表中新建申请修改具体信息', 'error');
+      else toast(err.message, 'error');
+    }
+  };
+}
+
+async function loadMakeupLogs() {
+  const params = new URLSearchParams();
+  Object.keys(makeupLogFilters).forEach(k => { if (makeupLogFilters[k]) params.append(k, makeupLogFilters[k]); });
+  const q = params.toString();
+  const list = await api('GET', `/api/makeup/logs${q ? '?' + q : ''}`);
+  const { users } = makeupCache;
+  const allUsers = await api('GET', '/api/users');
+
+  const fb = document.getElementById('makeup-log-filters');
+  fb.innerHTML = `
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <select id="mlf-action" style="padding:6px 8px;border:1px solid #ddd;border-radius:4px">
+        <option value="">全部动作</option>
+        ${['submit','approve','reject','revoke','cancel','resubmit','writeback','import','conflict_blocked','export_csv','import_requests'].map(a => `<option value="makeup_${a}" ${makeupLogFilters.action==='makeup_'+a?'selected':''}>${a}</option>`).join('')}
+      </select>
+      <select id="mlf-user" style="padding:6px 8px;border:1px solid #ddd;border-radius:4px">
+        <option value="">全部用户</option>
+        ${allUsers.map(u => `<option value="${u.id}" ${String(makeupLogFilters.user_id)===String(u.id)?'selected':''}>${u.name}</option>`).join('')}
+      </select>
+      <input type="text" id="mlf-kw" placeholder="关键字..." value="${makeupLogFilters.keyword||''}" style="width:140px;padding:6px 8px;border:1px solid #ddd;border-radius:4px">
+      <input type="date" id="mlf-ds" value="${makeupLogFilters.date_start||''}" style="padding:6px 8px;border:1px solid #ddd;border-radius:4px">
+      ~
+      <input type="date" id="mlf-de" value="${makeupLogFilters.date_end||''}" style="padding:6px 8px;border:1px solid #ddd;border-radius:4px">
+      <button class="btn btn-primary" onclick="applyMakeupLogFilters()">🔍 筛选</button>
+      <button class="btn" style="background:#eee;color:#555" onclick="resetMakeupLogFilters()">重置</button>
+    </div>`;
+
+  fb.querySelector('#mlf-action').onchange = applyMakeupLogFilters;
+  fb.querySelector('#mlf-user').onchange = applyMakeupLogFilters;
+  document.getElementById('mlf-kw').onkeyup = (e) => { if (e.key === 'Enter') applyMakeupLogFilters(); };
+  document.getElementById('mlf-ds').onchange = applyMakeupLogFilters;
+  document.getElementById('mlf-de').onchange = applyMakeupLogFilters;
+
+  if (list.length === 0) {
+    document.getElementById('makeup-log-list').innerHTML = '<div class="empty-state">暂无操作日志</div>';
+    return;
+  }
+
+  let h = '<table class="data-table"><thead><tr><th>时间</th><th>动作</th><th>用户</th><th>详情</th></tr></thead><tbody>';
+  list.forEach(l => {
+    const details = typeof l.details === 'object' ? JSON.stringify(l.details, null, 2) : (l.details || '');
+    h += `<tr><td class="log-time">${new Date(l.created_at).toLocaleString()}</td><td>${l.action}</td><td>${l.user_name||'-'}</td><td class="log-details"><pre>${escapeHtml(details)}</pre></td></tr>`;
+  });
+  h += '</tbody></table>';
+  document.getElementById('makeup-log-list').innerHTML = h;
+}
+
+function applyMakeupLogFilters() {
+  const getEl = (id) => document.getElementById(id);
+  makeupLogFilters = {
+    action: getEl('mlf-action') ? getEl('mlf-action').value : '',
+    user_id: getEl('mlf-user') ? getEl('mlf-user').value : '',
+    keyword: getEl('mlf-kw') ? getEl('mlf-kw').value.trim() : '',
+    date_start: getEl('mlf-ds') ? getEl('mlf-ds').value : '',
+    date_end: getEl('mlf-de') ? getEl('mlf-de').value : ''
+  };
+  loadMakeupLogs();
+}
+
+function resetMakeupLogFilters() {
+  makeupLogFilters = { action: '', user_id: '', keyword: '', date_start: '', date_end: '' };
+  loadMakeupLogs();
+}
 
 (async () => {
   try {

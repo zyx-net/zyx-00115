@@ -1089,6 +1089,680 @@ app.get('/api/dashboard', requireAuth, (req, res) => {
   });
 });
 
+app.get('/api/makeup/classrooms', requireAuth, (req, res) => {
+  res.json(db.getClassrooms());
+});
+
+app.get('/api/makeup/students', requireAuth, (req, res) => {
+  res.json(db.getStudents(req.query.q));
+});
+
+app.get('/api/makeup/schedules', requireAuth, (req, res) => {
+  const { class_id, teacher_id } = req.query;
+  if (class_id) return res.json(db.getSchedulesByClassId(parseInt(class_id)));
+  if (teacher_id) return res.json(db.getSchedulesByTeacherId(parseInt(teacher_id)));
+  res.json([]);
+});
+
+app.get('/api/makeup/students-by-class/:classId', requireAuth, (req, res) => {
+  res.json(db.getStudentsByClassId(parseInt(req.params.classId)));
+});
+
+app.post('/api/makeup/check-conflicts', requireRole('teacher', 'admin', 'lab_manager'), (req, res) => {
+  const raw = req.body || {};
+  const teacher_id = raw.teacher_id ?? raw.teacherId;
+  const classroom_id = raw.classroom_id ?? raw.classroomId;
+  const student_ids = raw.student_ids ?? raw.studentIds;
+  const date = raw.date;
+  const start_time = raw.start_time ?? raw.startTime;
+  const end_time = raw.end_time ?? raw.endTime;
+  const class_id = raw.class_id ?? raw.classId;
+  const new_class_id = raw.new_class_id ?? raw.newClassId;
+  const exclude_request_id = raw.exclude_request_id ?? raw.excludeRequestId;
+
+  if (!date || !start_time || !end_time) {
+    return res.status(400).json({ error: '缺少日期或时间信息' });
+  }
+
+  const result = db.checkAllTimeConflicts({
+    teacherId: teacher_id ? parseInt(teacher_id) : null,
+    classroomId: classroom_id ? parseInt(classroom_id) : null,
+    studentIds: student_ids || [],
+    date,
+    startTime: start_time,
+    endTime: end_time,
+    excludeRequestId: exclude_request_id ? parseInt(exclude_request_id) : null,
+    classId: class_id ? parseInt(class_id) : null,
+    newClassId: new_class_id ? parseInt(new_class_id) : null
+  });
+
+  res.json(result);
+});
+
+app.post('/api/makeup/requests', requireRole('teacher', 'admin', 'lab_manager'), (req, res) => {
+  const {
+    type, course_id, class_id, original_schedule_id,
+    original_date, original_start_time, original_end_time, original_classroom_id,
+    new_class_id, new_date, new_start_time, new_end_time, new_classroom_id, new_teacher_id,
+    student_ids, hours, reason, submit_reason
+  } = req.body;
+
+  if (!['makeup', 'swap_class', 'reschedule'].includes(type)) {
+    return res.status(400).json({ error: '申请类型不合法，需要是 makeup / swap_class / reschedule' });
+  }
+  if (!course_id || !class_id) {
+    return res.status(400).json({ error: '缺少课程或班级信息' });
+  }
+  if (!reason || !String(reason).trim()) {
+    return res.status(400).json({ error: '请填写申请原因' });
+  }
+  if (type === 'makeup' && (!new_date || !new_start_time || !new_end_time)) {
+    return res.status(400).json({ error: '补课申请需要填写新日期和时间段' });
+  }
+  if (type === 'swap_class' && !new_class_id) {
+    return res.status(400).json({ error: '换班申请需要选择目标班级' });
+  }
+  if (type === 'reschedule' && (!new_date || !new_start_time || !new_end_time)) {
+    return res.status(400).json({ error: '调时间申请需要填写新日期和时间段' });
+  }
+
+  const course = db.get('SELECT * FROM courses WHERE id = ?', [course_id]);
+  if (!course) return res.status(404).json({ error: '课程不存在' });
+
+  if (req.user.role === 'teacher' && course.teacher_id !== req.user.id) {
+    return res.status(403).json({ error: '只能为自己负责的课程发起申请' });
+  }
+
+  let conflictDate = new_date || original_date;
+  let conflictStart = new_start_time || original_start_time;
+  let conflictEnd = new_end_time || original_end_time;
+  let conflictTeacherId = new_teacher_id ? parseInt(new_teacher_id) : req.user.id;
+  let conflictClassroomId = new_classroom_id ? parseInt(new_classroom_id) : (original_classroom_id ? parseInt(original_classroom_id) : null);
+
+  if (conflictDate && conflictStart && conflictEnd) {
+    const chk = db.checkAllTimeConflicts({
+      teacherId: conflictTeacherId,
+      classroomId: conflictClassroomId,
+      studentIds: student_ids || [],
+      date: conflictDate,
+      startTime: conflictStart,
+      endTime: conflictEnd,
+      classId: class_id,
+      newClassId: new_class_id
+    });
+    if (chk.has_conflict) {
+      db.addLog('makeup_conflict_blocked', req.user.id, req.user.name, {
+        type, course_id, class_id, conflicts: chk.conflicts
+      });
+      db.forceSave();
+      return res.status(409).json({
+        error: '存在时间冲突，请调整后再提交',
+        conflict_type: 'time_conflict',
+        conflicts: chk.conflicts,
+        total_conflicts: chk.total
+      });
+    }
+  }
+
+  const now = new Date().toISOString();
+  let requestNo;
+  while (true) {
+    requestNo = db.generateMakeupRequestNo();
+    const exist = db.get('SELECT id FROM makeup_requests WHERE request_no = ?', [requestNo]);
+    if (!exist) break;
+  }
+
+  const parsedStudents = student_ids && student_ids.length > 0 ? db.serializeStudentIds(student_ids) : null;
+
+  const requestId = db.insertRun(`
+    INSERT INTO makeup_requests (
+      request_no, type, status, teacher_id, course_id, class_id, student_ids,
+      original_schedule_id, original_date, original_start_time, original_end_time, original_classroom_id,
+      new_class_id, new_date, new_start_time, new_end_time, new_classroom_id, new_teacher_id,
+      hours, reason, submit_reason, created_at, updated_at
+    ) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    requestNo, type, course.teacher_id, parseInt(course_id), parseInt(class_id), parsedStudents,
+    original_schedule_id ? parseInt(original_schedule_id) : null,
+    original_date || null, original_start_time || null, original_end_time || null,
+    original_classroom_id ? parseInt(original_classroom_id) : null,
+    new_class_id ? parseInt(new_class_id) : null,
+    new_date, new_start_time, new_end_time,
+    new_classroom_id ? parseInt(new_classroom_id) : null,
+    new_teacher_id ? parseInt(new_teacher_id) : null,
+    hours ? parseFloat(hours) : 2,
+    reason.trim(),
+    submit_reason ? submit_reason.trim() : null,
+    now, now
+  ]);
+
+  db.addMakeupApproval(requestId, 'submit', req.user.id, req.user.name, submit_reason ? submit_reason.trim() : null, {
+    request_no: requestNo, type, course_id, class_id
+  });
+
+  db.addLog('makeup_submit_request', req.user.id, req.user.name, {
+    request_id: requestId, request_no: requestNo, type, course_id, class_id,
+    new_date, new_start_time, new_end_time
+  });
+  db.forceSave();
+
+  const detail = db.getMakeupRequestById(requestId);
+  res.status(200).json(detail);
+});
+
+app.get('/api/makeup/requests', requireAuth, (req, res) => {
+  const filters = {
+    status: req.query.status,
+    type: req.query.type,
+    teacher_id: req.query.teacher_id,
+    course_id: req.query.course_id,
+    class_id: req.query.class_id,
+    request_no: req.query.request_no,
+    date_start: req.query.date_start,
+    date_end: req.query.date_end
+  };
+  const list = db.getMakeupRequestsByFilters(filters, req.user);
+  res.json(list);
+});
+
+app.get('/api/makeup/requests/:id', requireAuth, (req, res) => {
+  const id = parseInt(req.params.id);
+  const detail = db.getMakeupRequestById(id);
+  if (!detail) return res.status(404).json({ error: '申请不存在' });
+  if (req.user.role === 'teacher' && detail.teacher_id !== req.user.id) {
+    return res.status(403).json({ error: '只能查看自己的申请' });
+  }
+  detail.writebacks = db.getMakeupWritebackByRequestId(id);
+  res.json(detail);
+});
+
+app.put('/api/makeup/requests/:id/approve', requireRole('admin', 'lab_manager'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const { comment } = req.body;
+  const r = db.get('SELECT * FROM makeup_requests WHERE id = ?', [id]);
+  if (!r) return res.status(404).json({ error: '申请不存在' });
+  if (!['pending', 'resubmitted'].includes(r.status)) {
+    return res.status(400).json({ error: `当前状态为 ${r.status}，无法审批通过` });
+  }
+
+  const now = new Date().toISOString();
+  db.run(`
+    UPDATE makeup_requests SET
+      status = 'approved',
+      approval_comment = ?,
+      approved_by = ?,
+      approved_at = ?,
+      updated_at = ?
+    WHERE id = ?
+  `, [comment ? comment.trim() : null, req.user.id, now, now, id]);
+
+  db.addMakeupApproval(id, 'approve', req.user.id, req.user.name, comment ? comment.trim() : null, {
+    request_no: r.request_no, status_before: r.status
+  });
+
+  db.addLog('makeup_approve_request', req.user.id, req.user.name, {
+    request_id: id, request_no: r.request_no, status_before: r.status
+  });
+  db.forceSave();
+
+  const detail = db.getMakeupRequestById(id);
+  res.json(Object.assign({ ok: true }, detail));
+});
+
+app.put('/api/makeup/requests/:id/reject', requireRole('admin', 'lab_manager'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const { reason } = req.body;
+  if (!reason || !String(reason).trim()) {
+    return res.status(400).json({ error: '驳回需要写明原因' });
+  }
+  const r = db.get('SELECT * FROM makeup_requests WHERE id = ?', [id]);
+  if (!r) return res.status(404).json({ error: '申请不存在' });
+  if (!['pending', 'resubmitted'].includes(r.status)) {
+    return res.status(400).json({ error: `当前状态为 ${r.status}，无法驳回` });
+  }
+
+  const now = new Date().toISOString();
+  db.run(`
+    UPDATE makeup_requests SET
+      status = 'rejected',
+      reject_reason = ?,
+      rejected_by = ?,
+      rejected_at = ?,
+      updated_at = ?
+    WHERE id = ?
+  `, [reason.trim(), req.user.id, now, now, id]);
+
+  db.addMakeupApproval(id, 'reject', req.user.id, req.user.name, reason.trim(), {
+    request_no: r.request_no, status_before: r.status
+  });
+
+  db.addLog('makeup_reject_request', req.user.id, req.user.name, {
+    request_id: id, request_no: r.request_no, reason: reason.trim()
+  });
+  db.forceSave();
+
+  const detail = db.getMakeupRequestById(id);
+  res.json(Object.assign({ ok: true }, detail));
+});
+
+app.put('/api/makeup/requests/:id/cancel', requireRole('teacher', 'admin', 'lab_manager'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const { reason } = req.body;
+  const r = db.get('SELECT * FROM makeup_requests WHERE id = ?', [id]);
+  if (!r) return res.status(404).json({ error: '申请不存在' });
+
+  if (req.user.role === 'teacher' && r.teacher_id !== req.user.id) {
+    return res.status(403).json({ error: '只能撤销自己的申请' });
+  }
+  if (!['pending', 'resubmitted', 'approved'].includes(r.status)) {
+    return res.status(400).json({ error: `当前状态为 ${r.status}，无法取消` });
+  }
+  if (r.status === 'approved' && !['admin', 'lab_manager'].includes(req.user.role)) {
+    return res.status(403).json({ error: '已审批通过的申请需要管理员/教务取消' });
+  }
+
+  const now = new Date().toISOString();
+  db.run(`
+    UPDATE makeup_requests SET
+      status = 'cancelled',
+      cancelled_by = ?,
+      cancelled_at = ?,
+      updated_at = ?
+    WHERE id = ?
+  `, [req.user.id, now, now, id]);
+
+  db.addMakeupApproval(id, 'cancel', req.user.id, req.user.name, reason ? reason.trim() : null, {
+    request_no: r.request_no, status_before: r.status
+  });
+
+  db.addLog('makeup_cancel_request', req.user.id, req.user.name, {
+    request_id: id, request_no: r.request_no, status_before: r.status
+  });
+  db.forceSave();
+
+  const detail = db.getMakeupRequestById(id);
+  res.json(Object.assign({ ok: true }, detail));
+});
+
+app.put('/api/makeup/requests/:id/revoke', requireRole('admin', 'lab_manager'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const { reason } = req.body;
+  if (!reason || !String(reason).trim()) {
+    return res.status(400).json({ error: '撤销审批需要写明原因' });
+  }
+  const r = db.get('SELECT * FROM makeup_requests WHERE id = ?', [id]);
+  if (!r) return res.status(404).json({ error: '申请不存在' });
+  if (r.status !== 'approved') {
+    return res.status(400).json({ error: `当前状态为 ${r.status}，只能撤销已通过的审批` });
+  }
+
+  const now = new Date().toISOString();
+  db.run(`
+    UPDATE makeup_requests SET
+      status = 'revoked',
+      revoke_reason = ?,
+      revoked_by = ?,
+      revoked_at = ?,
+      updated_at = ?
+    WHERE id = ?
+  `, [reason.trim(), req.user.id, now, now, id]);
+
+  db.addMakeupApproval(id, 'revoke', req.user.id, req.user.name, reason.trim(), {
+    request_no: r.request_no, status_before: r.status
+  });
+
+  db.addLog('makeup_revoke_request', req.user.id, req.user.name, {
+    request_id: id, request_no: r.request_no, reason: reason.trim()
+  });
+  db.forceSave();
+
+  const detail = db.getMakeupRequestById(id);
+  res.json(Object.assign({ ok: true }, detail));
+});
+
+app.post('/api/makeup/requests/:id/resubmit', requireRole('teacher', 'admin', 'lab_manager'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const {
+    reason, submit_reason,
+    new_date, new_start_time, new_end_time, new_classroom_id, new_class_id, new_teacher_id,
+    student_ids, hours
+  } = req.body;
+
+  const r = db.get('SELECT * FROM makeup_requests WHERE id = ?', [id]);
+  if (!r) return res.status(404).json({ error: '申请不存在' });
+  if (req.user.role === 'teacher' && r.teacher_id !== req.user.id) {
+    return res.status(403).json({ error: '只能重新提交自己的申请' });
+  }
+  if (!['rejected', 'revoked', 'cancelled'].includes(r.status)) {
+    return res.status(400).json({ error: `当前状态为 ${r.status}，无法重新提交` });
+  }
+
+  const conflictDate = new_date || r.new_date;
+  const conflictStart = new_start_time || r.new_start_time;
+  const conflictEnd = new_end_time || r.new_end_time;
+  const conflictTeacherId = new_teacher_id ? parseInt(new_teacher_id) : (r.new_teacher_id || r.teacher_id);
+  const conflictClassroomId = new_classroom_id ? parseInt(new_classroom_id) : (r.new_classroom_id || r.original_classroom_id);
+  const parsedStudentIds = student_ids ? student_ids : db.parseStudentIds(r.student_ids);
+
+  if (conflictDate && conflictStart && conflictEnd) {
+    const chk = db.checkAllTimeConflicts({
+      teacherId: conflictTeacherId,
+      classroomId: conflictClassroomId,
+      studentIds: parsedStudentIds,
+      date: conflictDate,
+      startTime: conflictStart,
+      endTime: conflictEnd,
+      excludeRequestId: id,
+      classId: r.class_id,
+      newClassId: new_class_id ? parseInt(new_class_id) : r.new_class_id
+    });
+    if (chk.has_conflict) {
+      db.addLog('makeup_resubmit_conflict', req.user.id, req.user.name, {
+        request_id: id, conflicts: chk.conflicts
+      });
+      db.forceSave();
+      return res.status(409).json({
+        error: '重新提交仍存在时间冲突，请调整后再试',
+        conflict_type: 'time_conflict',
+        conflicts: chk.conflicts,
+        total_conflicts: chk.total
+      });
+    }
+  }
+
+  const now = new Date().toISOString();
+  const newCount = (r.resubmitted_count || 0) + 1;
+  const newRequestNo = db.generateMakeupRequestNo();
+
+  const newId = db.insertRun(`
+    INSERT INTO makeup_requests (
+      request_no, type, status, teacher_id, course_id, class_id, student_ids,
+      original_schedule_id, original_date, original_start_time, original_end_time, original_classroom_id,
+      new_class_id, new_date, new_start_time, new_end_time, new_classroom_id, new_teacher_id,
+      hours, reason, submit_reason, parent_request_id, resubmitted_count,
+      created_at, updated_at
+    ) VALUES (?, ?, 'resubmitted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    newRequestNo, r.type, r.teacher_id, r.course_id, r.class_id,
+    parsedStudentIds && parsedStudentIds.length > 0 ? db.serializeStudentIds(parsedStudentIds) : r.student_ids,
+    r.original_schedule_id, r.original_date, r.original_start_time, r.original_end_time, r.original_classroom_id,
+    new_class_id ? parseInt(new_class_id) : r.new_class_id,
+    new_date || r.new_date,
+    new_start_time || r.new_start_time,
+    new_end_time || r.new_end_time,
+    new_classroom_id ? parseInt(new_classroom_id) : r.new_classroom_id,
+    new_teacher_id ? parseInt(new_teacher_id) : r.new_teacher_id,
+    hours ? parseFloat(hours) : r.hours,
+    reason ? reason.trim() : r.reason,
+    submit_reason ? submit_reason.trim() : null,
+    id, newCount, now, now
+  ]);
+
+  db.addMakeupApproval(newId, 'resubmit', req.user.id, req.user.name, submit_reason ? submit_reason.trim() : null, {
+    parent_request_id: id, resubmitted_count: newCount
+  });
+  db.addLog('makeup_resubmit_request', req.user.id, req.user.name, {
+    request_id: newId, request_no: newRequestNo, parent_request_id: id, resubmitted_count: newCount
+  });
+  db.forceSave();
+
+  const detail = db.getMakeupRequestById(newId);
+  res.status(200).json(detail);
+});
+
+app.put('/api/makeup/requests/:id/writeback-hours', requireRole('admin', 'lab_manager'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const r = db.get('SELECT * FROM makeup_requests WHERE id = ?', [id]);
+  if (!r) return res.status(404).json({ error: '申请不存在' });
+  if (r.status !== 'approved') {
+    return res.status(400).json({ error: `当前状态为 ${r.status}，需要审批通过后才能回写课时` });
+  }
+
+  const result = db.writeBackHours(id, req.user.id, req.user.name);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  db.forceSave();
+
+  const detail = db.getMakeupRequestById(id);
+  detail.writebacks = db.getMakeupWritebackByRequestId(id);
+  res.json(Object.assign({ ok: true }, result, detail));
+});
+
+app.get('/api/makeup/stats', requireAuth, (req, res) => {
+  res.json(db.getMakeupStats(req.user));
+});
+
+app.get('/api/makeup/queue/pending', requireRole('admin', 'lab_manager'), (req, res) => {
+  const list = db.getMakeupRequestsByFilters({ status: 'pending' }, req.user).concat(
+    db.getMakeupRequestsByFilters({ status: 'resubmitted' }, req.user)
+  );
+  list.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  res.json(list);
+});
+
+app.get('/api/makeup/export/csv', requireAuth, (req, res) => {
+  const filters = {
+    status: req.query.status,
+    type: req.query.type,
+    teacher_id: req.query.teacher_id,
+    course_id: req.query.course_id,
+    class_id: req.query.class_id,
+    request_no: req.query.request_no,
+    date_start: req.query.date_start,
+    date_end: req.query.date_end
+  };
+  const list = db.getMakeupRequestsByFilters(filters, req.user);
+
+  const typeLabel = { makeup: '补课', swap_class: '换班', reschedule: '调时间' };
+  const statusLabel = {
+    pending: '待审批', resubmitted: '重新提交待审', approved: '审批通过',
+    rejected: '已驳回', cancelled: '已取消', revoked: '已撤销', completed: '已完成'
+  };
+
+  const rows = [];
+  rows.push([
+    '申请单号', '类型', '状态', '申请人', '课程', '原班级', '目标班级',
+    '原日期', '原开始', '原结束', '原教室',
+    '新日期', '新开始', '新结束', '新教室', '新教师',
+    '课时', '学员范围', '申请原因',
+    '审批意见', '驳回原因', '撤销原因', '重提次数',
+    '提交时间', '更新时间', '审批时间', '审批人'
+  ]);
+
+  list.forEach(r => {
+    const origCls = r.original_classroom_name || '';
+    const newCls = r.new_classroom_name || '';
+    const students = (r.student_ids_parsed && r.student_ids_parsed.length > 0)
+      ? `指定${r.student_ids_parsed.length}人` : '全班';
+    rows.push([
+      r.request_no, typeLabel[r.type] || r.type, statusLabel[r.status] || r.status,
+      r.teacher_name || '', r.course_name || '', r.class_name || '', r.new_class_name || '',
+      r.original_date || '', r.original_start_time || '', r.original_end_time || '', origCls,
+      r.new_date || '', r.new_start_time || '', r.new_end_time || '', newCls,
+      r.new_teacher_name || '', r.hours, students, r.reason || '',
+      r.approval_comment || '', r.reject_reason || '', r.revoke_reason || '',
+      r.resubmitted_count || 0,
+      r.created_at, r.updated_at, r.approved_at || '',
+      r.approved_by ? (db.get('SELECT name FROM users WHERE id = ?', [r.approved_by]) || {}).name || '' : ''
+    ]);
+  });
+
+  const csvContent = rows.map(r => r.map(cell => {
+    const s = String(cell == null ? '' : cell);
+    return s.includes(',') || s.includes('"') || s.includes('\n')
+      ? `"${s.replace(/"/g, '""')}"` : s;
+  }).join(',')).join('\n');
+
+  const now = new Date();
+  const ts = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const filename = `makeup-requests-${ts}.csv`;
+
+  db.addLog('makeup_export_csv', req.user.id, req.user.name, {
+    filename, row_count: list.length, filters
+  });
+  db.forceSave();
+
+  const bom = '\uFEFF';
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(bom + csvContent);
+});
+
+app.post('/api/makeup/import/json', requireRole('admin', 'lab_manager'), (req, res) => {
+  const data = req.body;
+  if (!data) return res.status(400).json({ error: '导入数据为空' });
+  const items = Array.isArray(data) ? data : (data.requests || [data]);
+  if (items.length === 0) return res.status(400).json({ error: '未找到可导入的申请记录' });
+
+  const report = { imported: 0, skipped: 0, failed: 0, duplicates: 0, conflicts: 0, details: [] };
+  const now = new Date().toISOString();
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const row = i + 1;
+
+    try {
+      if (!item.request_no) { report.failed++; report.details.push({ row, error: '缺少 request_no' }); continue; }
+      const exist = db.get('SELECT id FROM makeup_requests WHERE request_no = ?', [item.request_no]);
+      if (exist) {
+        report.duplicates++; report.skipped++;
+        report.details.push({ row, request_no: item.request_no, action: 'skip', reason: 'duplicate_no' });
+        continue;
+      }
+      if (!item.type || !['makeup','swap_class','reschedule'].includes(item.type)) {
+        report.failed++; report.details.push({ row, error: 'type 缺失或不合法' }); continue;
+      }
+      if (!item.course_id || !item.class_id || !item.teacher_id || !item.reason) {
+        report.failed++; report.details.push({ row, error: '缺少必填字段(course_id/class_id/teacher_id/reason)' }); continue;
+      }
+
+      const course = db.get('SELECT id FROM courses WHERE id = ?', [item.course_id]);
+      if (!course) { report.failed++; report.details.push({ row, error: `course_id=${item.course_id} 不存在` }); continue; }
+      const cls = db.get('SELECT id FROM classes WHERE id = ?', [item.class_id]);
+      if (!cls) { report.failed++; report.details.push({ row, error: `class_id=${item.class_id} 不存在` }); continue; }
+      const teacher = db.get('SELECT id FROM users WHERE id = ?', [item.teacher_id]);
+      if (!teacher) { report.failed++; report.details.push({ row, error: `teacher_id=${item.teacher_id} 不存在` }); continue; }
+
+      let requestNo = item.request_no;
+      let suffix = 0;
+      while (db.get('SELECT id FROM makeup_requests WHERE request_no = ?', [requestNo])) {
+        suffix++;
+        requestNo = `${item.request_no}-R${suffix}`;
+      }
+      if (suffix > 0) {
+        report.details.push({ row, original_no: item.request_no, adjusted_no: requestNo, reason: 'no_adjusted' });
+      }
+
+      const status = item.status || 'approved';
+      if (!['pending','approved','rejected','cancelled','revoked','resubmitted','completed'].includes(status)) {
+        report.failed++; report.details.push({ row, error: `status=${status} 不合法` }); continue;
+      }
+
+      const conflictDate = item.new_date;
+      if (conflictDate && item.new_start_time && item.new_end_time) {
+        const chk = db.checkAllTimeConflicts({
+          teacherId: item.new_teacher_id || item.teacher_id,
+          classroomId: item.new_classroom_id,
+          studentIds: db.parseStudentIds(item.student_ids),
+          date: conflictDate,
+          startTime: item.new_start_time,
+          endTime: item.new_end_time,
+          classId: item.class_id,
+          newClassId: item.new_class_id
+        });
+        if (chk.has_conflict) {
+          report.conflicts++; report.skipped++;
+          report.details.push({
+            row, request_no: requestNo, action: 'skip', reason: 'time_conflict',
+            conflict_count: chk.total, conflicts: chk.conflicts
+          });
+          continue;
+        }
+      }
+
+      const parsedStudentIds = db.serializeStudentIds(db.parseStudentIds(item.student_ids));
+      const newId = db.insertRun(`
+        INSERT INTO makeup_requests (
+          request_no, type, status, teacher_id, course_id, class_id, student_ids,
+          original_schedule_id, original_date, original_start_time, original_end_time, original_classroom_id,
+          new_class_id, new_date, new_start_time, new_end_time, new_classroom_id, new_teacher_id,
+          hours, reason, submit_reason, reject_reason, revoke_reason, approval_comment,
+          approved_by, approved_at, rejected_by, rejected_at,
+          revoked_by, revoked_at, cancelled_by, cancelled_at,
+          resubmitted_count, parent_request_id,
+          hours_written_back, import_source,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [
+        requestNo, item.type, status,
+        item.teacher_id, item.course_id, item.class_id, parsedStudentIds,
+        item.original_schedule_id || null,
+        item.original_date || null, item.original_start_time || null,
+        item.original_end_time || null, item.original_classroom_id || null,
+        item.new_class_id || null,
+        item.new_date || null, item.new_start_time || null,
+        item.new_end_time || null, item.new_classroom_id || null,
+        item.new_teacher_id || null,
+        item.hours ? parseFloat(item.hours) : 2,
+        String(item.reason).trim(),
+        item.submit_reason || null, item.reject_reason || null,
+        item.revoke_reason || null, item.approval_comment || null,
+        item.approved_by || null, item.approved_at || now,
+        item.rejected_by || null, item.rejected_at || null,
+        item.revoked_by || null, item.revoked_at || null,
+        item.cancelled_by || null, item.cancelled_at || null,
+        item.resubmitted_count || 0, item.parent_request_id || null,
+        item.hours_written_back ? 1 : 0,
+        'import_' + now,
+        item.created_at || now, item.updated_at || now
+      ]);
+
+      db.addMakeupApproval(newId, 'import', req.user.id, req.user.name, '导入恢复历史申请', {
+        original_request_no: item.request_no, effective_request_no: requestNo,
+        source_status: status, row_index: row
+      });
+
+      report.imported++;
+      report.details.push({ row, request_no: requestNo, id: newId, action: 'imported', status });
+    } catch (e) {
+      report.failed++;
+      report.details.push({ row, error: e.message });
+    }
+  }
+
+  db.addLog('makeup_import_requests', req.user.id, req.user.name, report);
+  db.forceSave();
+
+  if (report.imported === 0 && report.skipped === 0) {
+    return res.status(400).json({ ok: false, ...report, error: '没有成功导入任何数据' });
+  }
+  res.status(report.imported > 0 ? 201 : 200).json({ ok: true, ...report });
+});
+
+app.get('/api/makeup/logs', requireAuth, (req, res) => {
+  let sql = `
+    SELECT ol.*
+    FROM operation_logs ol
+    WHERE ol.action LIKE 'makeup_%'
+  `;
+  const params = [];
+  const filters = [];
+  if (req.query.action) { sql += ' AND ol.action = ?'; params.push(req.query.action); }
+  if (req.query.user_id) { sql += ' AND ol.user_id = ?'; params.push(parseInt(req.query.user_id)); }
+  if (req.query.keyword) {
+    sql += ' AND (ol.user_name LIKE ? OR ol.details LIKE ?)';
+    params.push(`%${req.query.keyword}%`, `%${req.query.keyword}%`);
+  }
+  if (req.query.date_start) { sql += ' AND ol.created_at >= ?'; params.push(req.query.date_start); }
+  if (req.query.date_end) { sql += ' AND ol.created_at <= ?'; params.push(req.query.date_end); }
+  sql += ' ORDER BY ol.created_at DESC, ol.id DESC LIMIT 500';
+
+  const list = db.all(sql, params);
+  list.forEach(l => {
+    try { l.details = JSON.parse(l.details); } catch(e) {}
+  });
+  res.json(list);
+});
+
 app.post('/api/reset', (req, res) => {
   Object.keys(sessions).forEach(k => delete sessions[k]);
   db.initDatabase(true).then(() => {

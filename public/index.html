@@ -48,6 +48,7 @@
           <li><a href="#" data-page="reservations" class="nav-link">📋 器材预约</a></li>
           <li><a href="#" data-page="loss-reports" class="nav-link">💥 损耗申报</a></li>
           <li><a href="#" data-page="settlements" class="nav-link">📅 周结转</a></li>
+          <li><a href="#" data-page="makeup-center" class="nav-link">📝 补课调课中心</a></li>
           <li><a href="#" data-page="export-history" class="nav-link nav-admin-only" style="display:none">📤 导出历史</a></li>
           <li><a href="#" data-page="ledger" class="nav-link nav-admin-only" style="display:none">📒 复盘台账</a></li>
           <li><a href="#" data-page="logs" class="nav-link">📜 操作日志</a></li>
@@ -87,6 +88,31 @@
           <h2>周结转</h2>
           <div id="settlement-actions" class="action-bar"></div>
           <div id="settlement-list"></div>
+        </div>
+
+        <div id="page-makeup-center" class="content-page">
+          <h2>📝 补课与调课审批中心</h2>
+          <div id="makeup-stats" class="stats-grid" style="margin-bottom:16px"></div>
+          <div id="makeup-tabs" class="makeup-tabs">
+            <button class="makeup-tab active" data-mtab="list">申请列表</button>
+            <button class="makeup-tab" data-mtab="submit">发起申请</button>
+            <button class="makeup-tab nav-admin-only" data-mtab="queue" style="display:none">待处理队列</button>
+            <button class="makeup-tab" data-mtab="logs">追溯日志</button>
+          </div>
+          <div id="makeup-tab-list" class="makeup-tab-panel active">
+            <div id="makeup-filters" class="action-bar"></div>
+            <div id="makeup-list"></div>
+          </div>
+          <div id="makeup-tab-submit" class="makeup-tab-panel">
+            <div id="makeup-submit-form" class="card"></div>
+          </div>
+          <div id="makeup-tab-queue" class="makeup-tab-panel nav-admin-only" style="display:none">
+            <div id="makeup-queue"></div>
+          </div>
+          <div id="makeup-tab-logs" class="makeup-tab-panel">
+            <div id="makeup-log-filters" class="action-bar"></div>
+            <div id="makeup-log-list"></div>
+          </div>
         </div>
 
         <div id="page-export-history" class="content-page">
