@@ -2000,6 +2000,228 @@ app.get('/api/inventory/teacher-items', requireAuth, (req, res) => {
   res.json(items);
 });
 
+app.post('/api/repair/orders', requireRole('teacher', 'lab_manager', 'admin'), (req, res) => {
+  const result = db.createRepairOrder(req.body, req.user.id, req.user.name);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  const order = db.getRepairOrderById(result.id);
+  res.status(201).json(order);
+});
+
+app.get('/api/repair/orders', requireAuth, (req, res) => {
+  const filters = {
+    status: req.query.status,
+    order_no: req.query.order_no,
+    equipment_id: req.query.equipment_id,
+    course_id: req.query.course_id,
+    reporter_id: req.query.reporter_id,
+    date_start: req.query.date_start,
+    date_end: req.query.date_end
+  };
+  const list = db.getRepairOrders(filters, req.user);
+  res.json(list);
+});
+
+app.get('/api/repair/orders/:id', requireAuth, (req, res) => {
+  const id = parseInt(req.params.id);
+  const order = db.getRepairOrderById(id);
+  if (!order) return res.status(404).json({ error: '维修单不存在' });
+
+  if (req.user.role === 'teacher') {
+    if (order.reporter_id !== req.user.id) {
+      const course = db.get('SELECT * FROM courses WHERE id = ? AND teacher_id = ?', [order.course_id, req.user.id]);
+      if (!course) {
+        return res.status(403).json({ error: '权限不足，只能查看自己提交或自己课程相关的维修单' });
+      }
+    }
+  }
+
+  res.json(order);
+});
+
+app.get('/api/repair/orders/:id/approvals', requireAuth, (req, res) => {
+  const id = parseInt(req.params.id);
+  const approvals = db.getRepairApprovalsByOrderId(id);
+  res.json(approvals);
+});
+
+app.get('/api/repair/check-conflict/:equipmentId', requireAuth, (req, res) => {
+  const equipmentId = parseInt(req.params.equipmentId);
+  const result = db.checkEquipmentInTransit(equipmentId);
+  res.json(result);
+});
+
+app.put('/api/repair/orders/:id/review', requireRole('admin', 'lab_manager'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const { comment } = req.body;
+  const result = db.reviewRepairOrder(id, req.user.id, req.user.name, comment);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  const order = db.getRepairOrderById(id);
+  res.json(order);
+});
+
+app.put('/api/repair/orders/:id/deactivate', requireRole('admin', 'lab_manager'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const { reason } = req.body;
+  const result = db.deactivateEquipment(id, req.user.id, req.user.name, reason);
+  if (!result.ok) {
+    if (result.conflicts) {
+      return res.status(409).json({
+        error: result.error,
+        conflicts: result.conflicts,
+        details: result.details
+      });
+    }
+    return res.status(400).json({ error: result.error });
+  }
+  const order = db.getRepairOrderById(id);
+  res.json(order);
+});
+
+app.put('/api/repair/orders/:id/repair', requireRole('admin', 'lab_manager'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const { vendor, scheduled_date, estimated_cost, reason } = req.body;
+  const result = db.arrangeRepair(id, req.user.id, req.user.name, vendor, scheduled_date, estimated_cost, reason);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  const order = db.getRepairOrderById(id);
+  res.json(order);
+});
+
+app.put('/api/repair/orders/:id/replace', requireRole('admin', 'lab_manager'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const { reason } = req.body;
+  const result = db.arrangeReplacement(id, req.user.id, req.user.name, reason);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  const order = db.getRepairOrderById(id);
+  res.json(order);
+});
+
+app.put('/api/repair/orders/:id/scrap', requireRole('admin', 'lab_manager'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const { reason } = req.body;
+  const result = db.scrapEquipment(id, req.user.id, req.user.name, reason);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  const order = db.getRepairOrderById(id);
+  res.json(order);
+});
+
+app.put('/api/repair/orders/:id/return', requireRole('admin', 'lab_manager'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const { actual_cost, note, return_date } = req.body;
+  const result = db.returnRepairedEquipment(id, req.user.id, req.user.name, actual_cost, note, return_date);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  const order = db.getRepairOrderById(id);
+  res.json(order);
+});
+
+app.put('/api/repair/orders/:id/cancel', requireRole('admin', 'lab_manager', 'teacher'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const { reason } = req.body;
+
+  const order = db.getRepairOrderById(id);
+  if (!order) return res.status(404).json({ error: '维修单不存在' });
+
+  if (req.user.role === 'teacher' && order.reporter_id !== req.user.id) {
+    return res.status(403).json({ error: '只能取消自己提交的维修单' });
+  }
+
+  const result = db.cancelRepairOrder(id, req.user.id, req.user.name, reason);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  const updated = db.getRepairOrderById(id);
+  res.json(updated);
+});
+
+app.put('/api/repair/orders/:id/revoke', requireRole('admin', 'lab_manager'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const { reason } = req.body;
+  const result = db.revokeRepairOrder(id, req.user.id, req.user.name, reason);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  const order = db.getRepairOrderById(id);
+  res.json({ ...order, revoked_from: result.old_status });
+});
+
+app.get('/api/repair/teacher-orders', requireRole('teacher'), (req, res) => {
+  const orders = db.getRepairOrdersForTeacher(req.user.id);
+  res.json(orders);
+});
+
+app.get('/api/repair/stats', requireAuth, (req, res) => {
+  const stats = db.getRepairStats(req.user);
+  res.json(stats);
+});
+
+app.post('/api/repair/schedules', requireRole('admin', 'lab_manager'), (req, res) => {
+  const { repair_order_id, vendor, contact_person, contact_phone, scheduled_date, estimated_cost, notes } = req.body;
+  if (!repair_order_id) return res.status(400).json({ error: '缺少维修单ID' });
+
+  const result = db.createRepairSchedule(repair_order_id, {
+    vendor, contact_person, contact_phone, scheduled_date, estimated_cost, notes
+  }, req.user.id, req.user.name);
+
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  const schedules = db.getRepairSchedules(repair_order_id);
+  res.status(201).json(schedules);
+});
+
+app.get('/api/repair/schedules', requireAuth, (req, res) => {
+  const repairOrderId = req.query.repair_order_id ? parseInt(req.query.repair_order_id) : null;
+  const schedules = db.getRepairSchedules(repairOrderId);
+  res.json(schedules);
+});
+
+app.put('/api/repair/schedules/:id', requireRole('admin', 'lab_manager'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const result = db.updateRepairSchedule(id, req.body, req.user.id, req.user.name);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  const schedules = db.getRepairSchedules();
+  res.json(schedules);
+});
+
+app.post('/api/repair/import/csv', requireRole('admin', 'lab_manager'), (req, res) => {
+  const { csv_data } = req.body;
+  if (!csv_data) return res.status(400).json({ error: '缺少 CSV 数据' });
+
+  const result = db.importRepairOrders(csv_data, req.user.id, req.user.name);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+
+  res.json({
+    imported: result.imported,
+    skipped: result.skipped,
+    errors: result.errors,
+    imported_items: result.imported_items,
+    skipped_items: result.skipped_items,
+    error_items: result.error_items
+  });
+});
+
+app.get('/api/repair/export/csv', requireRole('admin', 'lab_manager'), (req, res) => {
+  const filters = {
+    status: req.query.status,
+    order_no: req.query.order_no,
+    equipment_id: req.query.equipment_id,
+    course_id: req.query.course_id,
+    reporter_id: req.query.reporter_id,
+    date_start: req.query.date_start,
+    date_end: req.query.date_end
+  };
+
+  const orders = db.getRepairOrders(filters, null);
+  const csvContent = db.repairOrdersToCsv(orders);
+
+  const now = new Date();
+  const timestamp = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const filename = `repair-orders-${timestamp}.csv`;
+  const bom = '\uFEFF';
+
+  db.addLog('export_repair_orders_csv', req.user.id, req.user.name, {
+    filename, row_count: orders.length, filters
+  });
+  db.forceSave();
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(bom + csvContent);
+});
+
 app.post('/api/reset', (req, res) => {
   Object.keys(sessions).forEach(k => delete sessions[k]);
   db.initDatabase(true).then(() => {

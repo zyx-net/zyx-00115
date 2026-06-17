@@ -50,6 +50,7 @@
           <li><a href="#" data-page="settlements" class="nav-link">📅 周结转</a></li>
           <li><a href="#" data-page="makeup-center" class="nav-link">📝 补课调课中心</a></li>
           <li><a href="#" data-page="inventory-center" class="nav-link">🔍 盘点与纠偏中心</a></li>
+          <li><a href="#" data-page="repair-center" class="nav-link">🔧 器材维修停用与复用中心</a></li>
           <li><a href="#" data-page="export-history" class="nav-link nav-admin-only" style="display:none">📤 导出历史</a></li>
           <li><a href="#" data-page="ledger" class="nav-link nav-admin-only" style="display:none">📒 复盘台账</a></li>
           <li><a href="#" data-page="logs" class="nav-link">📜 操作日志</a></li>
@@ -120,6 +121,36 @@
           <h2>🔍 学期器材盘点与纠偏中心</h2>
           <div id="inventory-actions" class="action-bar"></div>
           <div id="inventory-list"></div>
+        </div>
+
+        <div id="page-repair-center" class="content-page">
+          <h2>🔧 器材维修停用与复用中心</h2>
+          <div id="repair-stats" class="stats-grid" style="margin-bottom:16px"></div>
+          <div id="repair-tabs" class="makeup-tabs">
+            <button class="makeup-tab active" data-rtab="list">维修单列表</button>
+            <button class="makeup-tab" data-rtab="submit">故障上报</button>
+            <button class="makeup-tab nav-admin-only" data-rtab="schedules" style="display:none">维修排期</button>
+            <button class="makeup-tab nav-admin-only" data-rtab="import" style="display:none">导入导出</button>
+            <button class="makeup-tab" data-rtab="approvals">审批留痕</button>
+          </div>
+          <div id="repair-tab-list" class="makeup-tab-panel active">
+            <div id="repair-filters" class="action-bar"></div>
+            <div id="repair-list"></div>
+          </div>
+          <div id="repair-tab-submit" class="makeup-tab-panel">
+            <div id="repair-submit-form" class="card"></div>
+          </div>
+          <div id="repair-tab-schedules" class="makeup-tab-panel nav-admin-only" style="display:none">
+            <div id="repair-schedule-actions" class="action-bar"></div>
+            <div id="repair-schedule-list"></div>
+          </div>
+          <div id="repair-tab-import" class="makeup-tab-panel nav-admin-only" style="display:none">
+            <div id="repair-import-actions" class="action-bar"></div>
+            <div id="repair-import-form" class="card"></div>
+          </div>
+          <div id="repair-tab-approvals" class="makeup-tab-panel">
+            <div id="repair-approval-list"></div>
+          </div>
         </div>
 
         <div id="page-export-history" class="content-page">

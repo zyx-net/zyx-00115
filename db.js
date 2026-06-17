@@ -353,6 +353,84 @@ function runMigrations() {
     `);
     saveToFile();
   }
+
+  if (!existingTables3.includes('repair_orders')) {
+    db.run(`
+      CREATE TABLE IF NOT EXISTS repair_orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_no TEXT UNIQUE NOT NULL,
+        course_id INTEGER REFERENCES courses(id),
+        class_id INTEGER REFERENCES classes(id),
+        equipment_id INTEGER NOT NULL REFERENCES equipment(id),
+        equipment_name TEXT NOT NULL,
+        qty INTEGER NOT NULL DEFAULT 1,
+        fault_phenomenon TEXT NOT NULL,
+        handling_suggestion TEXT,
+        reporter_id INTEGER NOT NULL REFERENCES users(id),
+        reporter_name TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','reviewing','deactivated','repairing','replacing','scrapped','returned','cancelled','revoked')),
+        decision TEXT,
+        decision_reason TEXT,
+        approver_id INTEGER REFERENCES users(id),
+        approver_name TEXT,
+        approved_at TEXT,
+        repair_vendor TEXT,
+        repair_cost REAL,
+        scheduled_date TEXT,
+        estimated_return_date TEXT,
+        actual_return_date TEXT,
+        repair_note TEXT,
+        import_source TEXT,
+        revoked_at TEXT,
+        revoked_by INTEGER REFERENCES users(id),
+        cancelled_at TEXT,
+        cancelled_by INTEGER REFERENCES users(id),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+    saveToFile();
+  }
+
+  if (!existingTables3.includes('repair_approvals')) {
+    db.run(`
+      CREATE TABLE IF NOT EXISTS repair_approvals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repair_order_id INTEGER NOT NULL REFERENCES repair_orders(id),
+        action TEXT NOT NULL CHECK(action IN ('submit','review','deactivate','repair','replace','scrap','return','cancel','revoke','import')),
+        operator_id INTEGER REFERENCES users(id),
+        operator_name TEXT,
+        comment TEXT,
+        details TEXT,
+        created_at TEXT NOT NULL
+      );
+    `);
+    saveToFile();
+  }
+
+  if (!existingTables3.includes('repair_schedules')) {
+    db.run(`
+      CREATE TABLE IF NOT EXISTS repair_schedules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repair_order_id INTEGER NOT NULL REFERENCES repair_orders(id),
+        vendor TEXT,
+        contact_person TEXT,
+        contact_phone TEXT,
+        scheduled_date TEXT,
+        estimated_cost REAL,
+        actual_cost REAL,
+        pickup_date TEXT,
+        return_date TEXT,
+        status TEXT NOT NULL DEFAULT 'scheduled' CHECK(status IN ('scheduled','picked_up','repairing','returned','cancelled')),
+        notes TEXT,
+        created_by INTEGER REFERENCES users(id),
+        created_by_name TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+    saveToFile();
+  }
 }
 
 function createTables() {
@@ -654,6 +732,72 @@ function createTables() {
       operator_id INTEGER REFERENCES users(id),
       operator_name TEXT,
       created_at TEXT NOT NULL
+    );
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS repair_orders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_no TEXT UNIQUE NOT NULL,
+      course_id INTEGER REFERENCES courses(id),
+      class_id INTEGER REFERENCES classes(id),
+      equipment_id INTEGER NOT NULL REFERENCES equipment(id),
+      equipment_name TEXT NOT NULL,
+      qty INTEGER NOT NULL DEFAULT 1,
+      fault_phenomenon TEXT NOT NULL,
+      handling_suggestion TEXT,
+      reporter_id INTEGER NOT NULL REFERENCES users(id),
+      reporter_name TEXT,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','reviewing','deactivated','repairing','replacing','scrapped','returned','cancelled','revoked')),
+      decision TEXT,
+      decision_reason TEXT,
+      approver_id INTEGER REFERENCES users(id),
+      approver_name TEXT,
+      approved_at TEXT,
+      repair_vendor TEXT,
+      repair_cost REAL,
+      scheduled_date TEXT,
+      estimated_return_date TEXT,
+      actual_return_date TEXT,
+      repair_note TEXT,
+      import_source TEXT,
+      revoked_at TEXT,
+      revoked_by INTEGER REFERENCES users(id),
+      cancelled_at TEXT,
+      cancelled_by INTEGER REFERENCES users(id),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS repair_approvals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      repair_order_id INTEGER NOT NULL REFERENCES repair_orders(id),
+      action TEXT NOT NULL CHECK(action IN ('submit','review','deactivate','repair','replace','scrap','return','cancel','revoke','import')),
+      operator_id INTEGER REFERENCES users(id),
+      operator_name TEXT,
+      comment TEXT,
+      details TEXT,
+      created_at TEXT NOT NULL
+    );
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS repair_schedules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      repair_order_id INTEGER NOT NULL REFERENCES repair_orders(id),
+      vendor TEXT,
+      contact_person TEXT,
+      contact_phone TEXT,
+      scheduled_date TEXT,
+      estimated_cost REAL,
+      actual_cost REAL,
+      pickup_date TEXT,
+      return_date TEXT,
+      status TEXT NOT NULL DEFAULT 'scheduled' CHECK(status IN ('scheduled','picked_up','repairing','returned','cancelled')),
+      notes TEXT,
+      created_by INTEGER REFERENCES users(id),
+      created_by_name TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
     );
   `);
 }
@@ -1946,6 +2090,733 @@ function getInventoryItemsForTeacher(teacherId) {
     ORDER BY ib.created_at DESC, ii.equipment_id`, equipmentIds);
 }
 
+function generateRepairOrderNo() {
+  const now = new Date();
+  const ymd = now.toISOString().slice(0, 10).replace(/-/g, '');
+  const rand = Math.floor(Math.random() * 9000 + 1000);
+  return `RP${ymd}${rand}`;
+}
+
+function checkEquipmentInTransit(equipmentId, qty = 1) {
+  const result = { in_transit: false, conflicts: [], details: {} };
+
+  const pendingReserve = get(
+    `SELECT COALESCE(SUM(qty),0) AS total FROM reservations WHERE equipment_id = ? AND status IN ('pending','approved')`,
+    [equipmentId]
+  );
+  const pendingReturn = get(
+    `SELECT COALESCE(SUM(qty - COALESCE(returned_qty,0)),0) AS total FROM reservations WHERE equipment_id = ? AND status IN ('collected','partially_returned')`,
+    [equipmentId]
+  );
+  const inInventory = get(
+    `SELECT COUNT(*) AS cnt FROM inventory_batches ib
+     JOIN inventory_items ii ON ib.id = ii.batch_id
+     WHERE ii.equipment_id = ? AND ib.status IN ('locked','counting','diff_confirmed','correcting')`,
+    [equipmentId]
+  );
+  const activeRepair = get(
+    `SELECT COUNT(*) AS cnt FROM repair_orders WHERE equipment_id = ? AND status IN ('deactivated','repairing','replacing')`,
+    [equipmentId]
+  );
+
+  const pendingReserveTotal = pendingReserve ? pendingReserve.total : 0;
+  const pendingReturnTotal = pendingReturn ? pendingReturn.total : 0;
+  const inInventoryCount = inInventory ? inInventory.cnt : 0;
+  const activeRepairCount = activeRepair ? activeRepair.cnt : 0;
+
+  result.details = {
+    pending_reserve: pendingReserveTotal,
+    pending_return: pendingReturnTotal,
+    in_inventory_check: inInventoryCount,
+    active_repair: activeRepairCount
+  };
+
+  if (pendingReserveTotal > 0) {
+    result.in_transit = true;
+    result.conflicts.push({ type: 'pending_reserve', qty: pendingReserveTotal, message: `有 ${pendingReserveTotal} 件器材已预约未领用` });
+  }
+  if (pendingReturnTotal > 0) {
+    result.in_transit = true;
+    result.conflicts.push({ type: 'pending_return', qty: pendingReturnTotal, message: `有 ${pendingReturnTotal} 件器材待归还正在流转中` });
+  }
+  if (inInventoryCount > 0) {
+    result.in_transit = true;
+    result.conflicts.push({ type: 'inventory_check', qty: inInventoryCount, message: `该器材正在 ${inInventoryCount} 个盘点批次中处理` });
+  }
+  if (activeRepairCount > 0) {
+    result.in_transit = true;
+    result.conflicts.push({ type: 'active_repair', qty: activeRepairCount, message: `该器材已有 ${activeRepairCount} 个维修单在处理中` });
+  }
+
+  return result;
+}
+
+function createRepairOrder(data, reporterId, reporterName) {
+  const { course_id, class_id, equipment_id, qty, fault_phenomenon, handling_suggestion } = data;
+  if (!equipment_id || !qty || qty <= 0 || !fault_phenomenon) {
+    return { ok: false, error: '缺少必要参数：器材、数量、故障现象不能为空' };
+  }
+
+  const eq = get('SELECT * FROM equipment WHERE id = ?', [equipment_id]);
+  if (!eq) return { ok: false, error: '器材不存在' };
+
+  if (course_id) {
+    const course = get('SELECT * FROM courses WHERE id = ?', [course_id]);
+    if (!course) return { ok: false, error: '课程不存在' };
+  }
+
+  const now = new Date().toISOString();
+  let orderNo;
+  while (true) {
+    orderNo = generateRepairOrderNo();
+    const exist = get('SELECT id FROM repair_orders WHERE order_no = ?', [orderNo]);
+    if (!exist) break;
+  }
+
+  const orderId = insertRun(
+    `INSERT INTO repair_orders (
+      order_no, course_id, class_id, equipment_id, equipment_name, qty,
+      fault_phenomenon, handling_suggestion, reporter_id, reporter_name,
+      status, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+    [orderNo, course_id || null, class_id || null, equipment_id, eq.name, qty,
+      fault_phenomenon.trim(), handling_suggestion ? handling_suggestion.trim() : null,
+      reporterId, reporterName, now, now]
+  );
+
+  addRepairApproval(orderId, 'submit', reporterId, reporterName, '提交故障单', {
+    equipment_id, equipment_name: eq.name, qty, fault_phenomenon
+  });
+
+  addLog('create_repair_order', reporterId, reporterName, {
+    order_id: orderId, order_no: orderNo, equipment_id, qty
+  });
+  forceSave();
+
+  return { ok: true, id: orderId, order_no: orderNo };
+}
+
+function addRepairApproval(repairOrderId, action, operatorId, operatorName, comment, details) {
+  const now = new Date().toISOString();
+  insertRun(
+    `INSERT INTO repair_approvals (repair_order_id, action, operator_id, operator_name, comment, details, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [repairOrderId, action, operatorId, operatorName, comment || null,
+      details ? (typeof details === 'string' ? details : JSON.stringify(details)) : null, now]
+  );
+}
+
+function getRepairApprovalsByOrderId(orderId) {
+  return all(`
+    SELECT ra.*, u.username AS operator_username
+    FROM repair_approvals ra
+    LEFT JOIN users u ON ra.operator_id = u.id
+    WHERE ra.repair_order_id = ?
+    ORDER BY ra.created_at ASC, ra.id ASC
+  `, [orderId]);
+}
+
+function getRepairOrderById(id) {
+  const row = get(`
+    SELECT ro.*,
+      c.name AS course_name, cl.name AS class_name, cl.semester AS class_semester,
+      e.name AS equipment_name, e.total_qty AS equipment_total, e.available_qty AS equipment_available,
+      ru.name AS reporter_username, au.name AS approver_name
+    FROM repair_orders ro
+    JOIN equipment e ON ro.equipment_id = e.id
+    JOIN users ru ON ro.reporter_id = ru.id
+    LEFT JOIN courses c ON ro.course_id = c.id
+    LEFT JOIN classes cl ON ro.class_id = cl.id
+    LEFT JOIN users au ON ro.approver_id = au.id
+    WHERE ro.id = ?
+  `, [id]);
+  if (!row) return null;
+  row.approvals = getRepairApprovalsByOrderId(id);
+  row.schedules = all('SELECT * FROM repair_schedules WHERE repair_order_id = ? ORDER BY created_at DESC', [id]);
+  return row;
+}
+
+function getRepairOrders(filters = {}, currentUser) {
+  let sql = `
+    SELECT ro.*,
+      c.name AS course_name, cl.name AS class_name,
+      e.name AS equipment_name,
+      ru.name AS reporter_name, au.name AS approver_name
+    FROM repair_orders ro
+    JOIN equipment e ON ro.equipment_id = e.id
+    JOIN users ru ON ro.reporter_id = ru.id
+    LEFT JOIN courses c ON ro.course_id = c.id
+    LEFT JOIN classes cl ON ro.class_id = cl.id
+    LEFT JOIN users au ON ro.approver_id = au.id
+    WHERE 1=1
+  `;
+  const params = [];
+
+  if (currentUser && currentUser.role === 'teacher') {
+    sql += ' AND (ro.reporter_id = ? OR ro.course_id IN (SELECT id FROM courses WHERE teacher_id = ?))';
+    params.push(currentUser.id, currentUser.id);
+  }
+
+  if (filters.status) {
+    sql += ' AND ro.status = ?';
+    params.push(filters.status);
+  }
+  if (filters.order_no) {
+    sql += ' AND ro.order_no LIKE ?';
+    params.push(`%${filters.order_no}%`);
+  }
+  if (filters.equipment_id) {
+    sql += ' AND ro.equipment_id = ?';
+    params.push(parseInt(filters.equipment_id));
+  }
+  if (filters.course_id) {
+    sql += ' AND ro.course_id = ?';
+    params.push(parseInt(filters.course_id));
+  }
+  if (filters.reporter_id) {
+    sql += ' AND ro.reporter_id = ?';
+    params.push(parseInt(filters.reporter_id));
+  }
+  if (filters.date_start) {
+    sql += ' AND ro.created_at >= ?';
+    params.push(filters.date_start);
+  }
+  if (filters.date_end) {
+    sql += ' AND ro.created_at <= ?';
+    params.push(filters.date_end);
+  }
+
+  sql += ' ORDER BY ro.created_at DESC, ro.id DESC LIMIT 500';
+  return all(sql, params);
+}
+
+function getRepairOrdersForTeacher(teacherId) {
+  const courses = all('SELECT id FROM courses WHERE teacher_id = ?', [teacherId]);
+  const courseIds = courses.map(c => c.id);
+  let sql = `
+    SELECT ro.*,
+      c.name AS course_name, cl.name AS class_name,
+      e.name AS equipment_name,
+      ru.name AS reporter_name
+    FROM repair_orders ro
+    JOIN equipment e ON ro.equipment_id = e.id
+    JOIN users ru ON ro.reporter_id = ru.id
+    LEFT JOIN courses c ON ro.course_id = c.id
+    LEFT JOIN classes cl ON ro.class_id = cl.id
+    WHERE ro.reporter_id = ?
+  `;
+  const params = [teacherId];
+  if (courseIds.length > 0) {
+    const ph = courseIds.map(() => '?').join(',');
+    sql += ` OR ro.course_id IN (${ph})`;
+    params.push(...courseIds);
+  }
+  sql += ' ORDER BY ro.created_at DESC LIMIT 200';
+  return all(sql, params);
+}
+
+const REPAIR_STATUS_FLOW = {
+  pending: ['reviewing', 'cancelled'],
+  reviewing: ['deactivated', 'repairing', 'replacing', 'scrapped', 'cancelled', 'pending'],
+  deactivated: ['repairing', 'replacing', 'scrapped', 'pending', 'reviewing'],
+  repairing: ['returned', 'replacing', 'scrapped', 'deactivated'],
+  replacing: ['returned', 'scrapped', 'deactivated', 'repairing'],
+  scrapped: [],
+  returned: [],
+  cancelled: [],
+  revoked: []
+};
+
+function canTransitionStatus(fromStatus, toStatus) {
+  const allowed = REPAIR_STATUS_FLOW[fromStatus] || [];
+  return allowed.includes(toStatus);
+}
+
+function updateRepairStatus(orderId, newStatus, decision, decisionReason, approverId, approverName, action, comment) {
+  const order = get('SELECT * FROM repair_orders WHERE id = ?', [orderId]);
+  if (!order) return { ok: false, error: '维修单不存在' };
+
+  if (order.status === newStatus) {
+    return { ok: false, error: `已经是 ${newStatus} 状态，无需重复操作` };
+  }
+
+  if (!canTransitionStatus(order.status, newStatus)) {
+    return { ok: false, error: `状态不合法：不能从 ${order.status} 直接变更为 ${newStatus}` };
+  }
+
+  const now = new Date().toISOString();
+  const updates = [];
+  const params = [];
+
+  updates.push('status = ?');
+  params.push(newStatus);
+  updates.push('updated_at = ?');
+  params.push(now);
+
+  if (decision) {
+    updates.push('decision = ?');
+    params.push(decision);
+  }
+  if (decisionReason) {
+    updates.push('decision_reason = ?');
+    params.push(decisionReason);
+  }
+  if (approverId) {
+    updates.push('approver_id = ?');
+    params.push(approverId);
+    updates.push('approver_name = ?');
+    params.push(approverName);
+    updates.push('approved_at = ?');
+    params.push(now);
+  }
+
+  params.push(orderId);
+
+  run(`UPDATE repair_orders SET ${updates.join(', ')} WHERE id = ?`, params);
+
+  addRepairApproval(orderId, action, approverId, approverName, comment, {
+    old_status: order.status, new_status: newStatus, decision, decision_reason: decisionReason
+  });
+
+  addLog(`repair_${action}`, approverId, approverName, {
+    order_id: orderId, order_no: order.order_no, old_status: order.status, new_status: newStatus
+  });
+
+  return { ok: true, old_status: order.status, new_status: newStatus };
+}
+
+function reviewRepairOrder(orderId, userId, userName, comment) {
+  return updateRepairStatus(orderId, 'reviewing', 'review', comment || '开始审核', userId, userName, 'review', comment || '开始审核');
+}
+
+function deactivateEquipment(orderId, userId, userName, decisionReason) {
+  const order = get('SELECT * FROM repair_orders WHERE id = ?', [orderId]);
+  if (!order) return { ok: false, error: '维修单不存在' };
+
+  const transit = checkEquipmentInTransit(order.equipment_id, order.qty);
+  if (transit.in_transit) {
+    return {
+      ok: false,
+      error: `器材存在流转冲突，无法停用：${transit.conflicts.map(c => c.message).join('；')}`,
+      conflicts: transit.conflicts,
+      details: transit.details
+    };
+  }
+
+  const eq = get('SELECT * FROM equipment WHERE id = ?', [order.equipment_id]);
+  if (!eq) return { ok: false, error: '器材不存在' };
+
+  const newAvailable = eq.available_qty - order.qty;
+  if (newAvailable < 0) {
+    return { ok: false, error: `可用器材不足，无法停用 ${order.qty} 件（当前可用 ${eq.available_qty} 件）` };
+  }
+
+  run('UPDATE equipment SET available_qty = available_qty - ?, locked_qty = locked_qty + ? WHERE id = ?',
+    [order.qty, order.qty, order.equipment_id]);
+
+  const result = updateRepairStatus(orderId, 'deactivated', 'deactivate', decisionReason || '立即停用', userId, userName, 'deactivate', decisionReason || '立即停用');
+  if (result.ok) {
+    addLog('repair_deactivate_equipment', userId, userName, {
+      order_id: orderId, equipment_id: order.equipment_id, qty: order.qty
+    });
+    forceSave();
+  }
+  return result;
+}
+
+function arrangeRepair(orderId, userId, userName, vendor, scheduledDate, estimatedCost, decisionReason) {
+  const order = get('SELECT * FROM repair_orders WHERE id = ?', [orderId]);
+  if (!order) return { ok: false, error: '维修单不存在' };
+
+  const now = new Date().toISOString();
+  const updates = [];
+  const params = [];
+
+  if (vendor) { updates.push('repair_vendor = ?'); params.push(vendor); }
+  if (scheduledDate) { updates.push('scheduled_date = ?'); params.push(scheduledDate); }
+  if (estimatedCost) { updates.push('repair_cost = ?'); params.push(estimatedCost); }
+  updates.push('updated_at = ?');
+  params.push(now);
+  params.push(orderId);
+
+  if (updates.length > 1) {
+    run(`UPDATE repair_orders SET ${updates.join(', ')} WHERE id = ?`, params);
+  }
+
+  return updateRepairStatus(orderId, 'repairing', 'repair', decisionReason || '安排送修', userId, userName, 'repair', decisionReason || '安排送修');
+}
+
+function arrangeReplacement(orderId, userId, userName, decisionReason) {
+  return updateRepairStatus(orderId, 'replacing', 'replace', decisionReason || '安排换件', userId, userName, 'replace', decisionReason || '安排换件');
+}
+
+function scrapEquipment(orderId, userId, userName, decisionReason) {
+  const order = get('SELECT * FROM repair_orders WHERE id = ?', [orderId]);
+  if (!order) return { ok: false, error: '维修单不存在' };
+
+  const eq = get('SELECT * FROM equipment WHERE id = ?', [order.equipment_id]);
+  if (!eq) return { ok: false, error: '器材不存在' };
+
+  if (['deactivated', 'repairing', 'replacing'].includes(order.status)) {
+    run('UPDATE equipment SET total_qty = total_qty - ?, locked_qty = locked_qty - ? WHERE id = ?',
+      [order.qty, order.qty, order.equipment_id]);
+  } else {
+    const newTotal = eq.total_qty - order.qty;
+    const newAvailable = eq.available_qty - order.qty;
+    if (newTotal < 0 || newAvailable < 0) {
+      return { ok: false, error: `库存不足，无法报废 ${order.qty} 件` };
+    }
+    run('UPDATE equipment SET total_qty = total_qty - ?, available_qty = available_qty - ? WHERE id = ?',
+      [order.qty, order.qty, order.equipment_id]);
+  }
+
+  const result = updateRepairStatus(orderId, 'scrapped', 'scrap', decisionReason || '器材报废', userId, userName, 'scrap', decisionReason || '器材报废');
+  if (result.ok) {
+    addLog('repair_scrap_equipment', userId, userName, {
+      order_id: orderId, equipment_id: order.equipment_id, qty: order.qty
+    });
+    forceSave();
+  }
+  return result;
+}
+
+function returnRepairedEquipment(orderId, userId, userName, actualCost, returnNote, actualReturnDate) {
+  const order = get('SELECT * FROM repair_orders WHERE id = ?', [orderId]);
+  if (!order) return { ok: false, error: '维修单不存在' };
+
+  const eq = get('SELECT * FROM equipment WHERE id = ?', [order.equipment_id]);
+  if (!eq) return { ok: false, error: '器材不存在' };
+
+  const now = new Date().toISOString();
+  const returnDate = actualReturnDate || now;
+
+  const updates = ['updated_at = ?', 'actual_return_date = ?'];
+  const params = [now, returnDate];
+
+  if (actualCost != null) {
+    updates.push('repair_cost = ?');
+    params.push(actualCost);
+  }
+  if (returnNote) {
+    updates.push('repair_note = ?');
+    params.push(returnNote);
+  }
+
+  params.push(orderId);
+  run(`UPDATE repair_orders SET ${updates.join(', ')} WHERE id = ?`, params);
+
+  if (['deactivated', 'repairing', 'replacing'].includes(order.status)) {
+    run('UPDATE equipment SET available_qty = available_qty + ?, locked_qty = locked_qty - ? WHERE id = ?',
+      [order.qty, order.qty, order.equipment_id]);
+  }
+
+  const result = updateRepairStatus(orderId, 'returned', 'return', returnNote || '维修完成回库', userId, userName, 'return', returnNote || '维修完成回库');
+  if (result.ok) {
+    addLog('repair_return_equipment', userId, userName, {
+      order_id: orderId, equipment_id: order.equipment_id, qty: order.qty, actual_cost: actualCost
+    });
+    forceSave();
+  }
+  return result;
+}
+
+function cancelRepairOrder(orderId, userId, userName, reason) {
+  const order = get('SELECT * FROM repair_orders WHERE id = ?', [orderId]);
+  if (!order) return { ok: false, error: '维修单不存在' };
+
+  if (!['pending', 'reviewing'].includes(order.status)) {
+    return { ok: false, error: `当前状态为 ${order.status}，无法取消（只能取消待处理或审核中的单据）` };
+  }
+
+  const now = new Date().toISOString();
+  run('UPDATE repair_orders SET status = \'cancelled\', cancelled_at = ?, cancelled_by = ?, updated_at = ? WHERE id = ?',
+    [now, userId, now, orderId]);
+
+  addRepairApproval(orderId, 'cancel', userId, userName, reason || '取消维修单', { old_status: order.status });
+  addLog('cancel_repair_order', userId, userName, { order_id: orderId, order_no: order.order_no, reason });
+  forceSave();
+  return { ok: true };
+}
+
+function revokeRepairOrder(orderId, userId, userName, reason) {
+  const order = get('SELECT * FROM repair_orders WHERE id = ?', [orderId]);
+  if (!order) return { ok: false, error: '维修单不存在' };
+
+  if (['scrapped', 'returned', 'cancelled', 'revoked'].includes(order.status)) {
+    return { ok: false, error: `当前状态为 ${order.status}，无法撤销（终态不可撤销）` };
+  }
+
+  if (['deactivated', 'repairing', 'replacing'].includes(order.status)) {
+    const eq = get('SELECT * FROM equipment WHERE id = ?', [order.equipment_id]);
+    if (!eq) return { ok: false, error: '器材不存在' };
+
+    if (eq.locked_qty < order.qty) {
+      return { ok: false, error: `锁定数量不足，撤销时无法恢复库存（锁定 ${eq.locked_qty}，需恢复 ${order.qty}）` };
+    }
+
+    run('UPDATE equipment SET available_qty = available_qty + ?, locked_qty = locked_qty - ? WHERE id = ?',
+      [order.qty, order.qty, order.equipment_id]);
+  }
+
+  const now = new Date().toISOString();
+  const oldStatus = order.status;
+  run('UPDATE repair_orders SET status = \'revoked\', revoked_at = ?, revoked_by = ?, updated_at = ? WHERE id = ?',
+    [now, userId, now, orderId]);
+
+  addRepairApproval(orderId, 'revoke', userId, userName, reason || '撤销维修单', { old_status: oldStatus });
+  addLog('revoke_repair_order', userId, userName, {
+    order_id: orderId, order_no: order.order_no, old_status: oldStatus, reason
+  });
+  forceSave();
+  return { ok: true, old_status: oldStatus };
+}
+
+function createRepairSchedule(orderId, data, userId, userName) {
+  const { vendor, contact_person, contact_phone, scheduled_date, estimated_cost, notes } = data;
+  if (!orderId) return { ok: false, error: '缺少维修单ID' };
+
+  const order = get('SELECT * FROM repair_orders WHERE id = ?', [orderId]);
+  if (!order) return { ok: false, error: '维修单不存在' };
+
+  const now = new Date().toISOString();
+  const scheduleId = insertRun(
+    `INSERT INTO repair_schedules (
+      repair_order_id, vendor, contact_person, contact_phone, scheduled_date,
+      estimated_cost, status, notes, created_by, created_by_name, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?)`,
+    [orderId, vendor || null, contact_person || null, contact_phone || null,
+      scheduled_date || null, estimated_cost || null, notes || null,
+      userId, userName, now, now]
+  );
+
+  addLog('create_repair_schedule', userId, userName, {
+    schedule_id: scheduleId, order_id: orderId, vendor
+  });
+  forceSave();
+
+  return { ok: true, id: scheduleId };
+}
+
+function updateRepairSchedule(scheduleId, data, userId, userName) {
+  const schedule = get('SELECT * FROM repair_schedules WHERE id = ?', [scheduleId]);
+  if (!schedule) return { ok: false, error: '维修排期不存在' };
+
+  const allowedUpdates = ['vendor', 'contact_person', 'contact_phone', 'scheduled_date', 'estimated_cost', 'actual_cost', 'pickup_date', 'return_date', 'status', 'notes'];
+  const updates = [];
+  const params = [];
+
+  for (const key of allowedUpdates) {
+    if (data[key] !== undefined && data[key] !== null) {
+      updates.push(`${key} = ?`);
+      params.push(data[key]);
+    }
+  }
+
+  if (updates.length === 0) {
+    return { ok: false, error: '没有需要更新的字段' };
+  }
+
+  updates.push('updated_at = ?');
+  params.push(new Date().toISOString());
+  params.push(scheduleId);
+
+  run(`UPDATE repair_schedules SET ${updates.join(', ')} WHERE id = ?`, params);
+
+  addLog('update_repair_schedule', userId, userName, {
+    schedule_id: scheduleId, updates: data
+  });
+  forceSave();
+
+  return { ok: true };
+}
+
+function getRepairSchedules(orderId) {
+  if (orderId) {
+    return all('SELECT * FROM repair_schedules WHERE repair_order_id = ? ORDER BY created_at DESC', [orderId]);
+  }
+  return all(`
+    SELECT rs.*, ro.order_no, ro.equipment_name, ro.status AS repair_status
+    FROM repair_schedules rs
+    JOIN repair_orders ro ON rs.repair_order_id = ro.id
+    ORDER BY rs.created_at DESC LIMIT 200
+  `);
+}
+
+function getRepairStats(currentUser) {
+  const base = currentUser && currentUser.role === 'teacher'
+    ? ` WHERE reporter_id = ${currentUser.id} OR course_id IN (SELECT id FROM courses WHERE teacher_id = ${currentUser.id})`
+    : '';
+
+  const rows = all(`SELECT status, COUNT(*) AS cnt, SUM(qty) AS total_qty FROM repair_orders${base} GROUP BY status`);
+  const stats = {
+    total: 0, total_qty: 0,
+    pending: 0, reviewing: 0, deactivated: 0, repairing: 0, replacing: 0,
+    scrapped: 0, returned: 0, cancelled: 0, revoked: 0,
+    by_status: {}
+  };
+  rows.forEach(r => {
+    stats[r.status] = r.cnt;
+    stats.total += r.cnt;
+    stats.total_qty += r.total_qty || 0;
+    stats.by_status[r.status] = { count: r.cnt, qty: r.total_qty || 0 };
+  });
+  return stats;
+}
+
+function parseRepairCsvRow(row, headers) {
+  const result = {};
+  headers.forEach((h, i) => {
+    result[h.trim()] = row[i] != null ? String(row[i]).trim() : '';
+  });
+  return result;
+}
+
+function importRepairOrders(csvData, userId, userName) {
+  if (!csvData || typeof csvData !== 'string') {
+    return { ok: false, error: 'CSV 数据不能为空' };
+  }
+
+  const lines = csvData.split(/\r?\n/).filter(l => l.trim().length > 0);
+  if (lines.length < 2) {
+    return { ok: false, error: 'CSV 数据格式错误，至少需要标题行和一行数据' };
+  }
+
+  const headers = lines[0].split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map(h => h.replace(/"/g, '').trim());
+
+  const equipmentMap = {};
+  all('SELECT id, name FROM equipment').forEach(e => { equipmentMap[e.name] = e.id; });
+
+  const userMap = {};
+  all('SELECT id, username, name FROM users').forEach(u => { userMap[u.username] = u.id; userMap[u.name] = u.id; });
+
+  const courseMap = {};
+  all('SELECT id, name FROM courses').forEach(c => { courseMap[c.name] = c.id; });
+
+  const classMap = {};
+  all('SELECT id, name FROM classes').forEach(c => { classMap[c.name] = c.id; });
+
+  const existingOrderNos = new Set(all('SELECT order_no FROM repair_orders').map(r => r.order_no));
+
+  const imported = [];
+  const skipped = [];
+  const errors = [];
+
+  const validStatuses = ['pending', 'reviewing', 'deactivated', 'repairing', 'replacing', 'scrapped', 'returned', 'cancelled', 'revoked'];
+
+  for (let i = 1; i < lines.length; i++) {
+    const rawRow = lines[i].split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map(cell => cell.replace(/^"|"$/g, '').replace(/""/g, '"'));
+    const row = parseRepairCsvRow(rawRow, headers);
+
+    try {
+      if (row['维修单号'] && existingOrderNos.has(row['维修单号'])) {
+        skipped.push({ row: i + 1, order_no: row['维修单号'], reason: '单号已存在' });
+        continue;
+      }
+
+      const equipmentId = row['器材名称'] ? equipmentMap[row['器材名称']] : (row['器材ID'] ? parseInt(row['器材ID']) : null);
+      if (!equipmentId) {
+        errors.push({ row: i + 1, error: `找不到器材：${row['器材名称'] || row['器材ID']}` });
+        continue;
+      }
+
+      const eq = get('SELECT * FROM equipment WHERE id = ?', [equipmentId]);
+      const qty = parseInt(row['数量']) || 1;
+      const status = row['状态'] && validStatuses.includes(row['状态']) ? row['状态'] : 'pending';
+
+      let reporterId = userId;
+      if (row['上报人']) {
+        reporterId = userMap[row['上报人']] || userId;
+      }
+
+      let courseId = row['课程名称'] ? courseMap[row['课程名称']] : (row['课程ID'] ? parseInt(row['课程ID']) : null);
+      let classId = row['班级名称'] ? classMap[row['班级名称']] : (row['班级ID'] ? parseInt(row['班级ID']) : null);
+
+      const now = new Date().toISOString();
+      let orderNo = row['维修单号'];
+      if (!orderNo) {
+        while (true) {
+          orderNo = generateRepairOrderNo();
+          if (!existingOrderNos.has(orderNo)) break;
+        }
+      }
+
+      const createdAt = row['创建时间'] || now;
+      const updatedAt = row['更新时间'] || now;
+
+      const orderId = insertRun(
+        `INSERT INTO repair_orders (
+          order_no, course_id, class_id, equipment_id, equipment_name, qty,
+          fault_phenomenon, handling_suggestion, reporter_id, reporter_name,
+          status, decision, decision_reason, approver_id, approver_name, approved_at,
+          repair_vendor, repair_cost, scheduled_date, estimated_return_date, actual_return_date,
+          repair_note, import_source, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [orderNo, courseId || null, classId || null, equipmentId, eq.name, qty,
+          row['故障现象'] || '导入历史数据', row['处理建议'] || null,
+          reporterId, row['上报人'] || userName, status,
+          row['处理决定'] || null, row['决定原因'] || null,
+          row['审批人ID'] ? parseInt(row['审批人ID']) : (row['审批人'] ? userMap[row['审批人']] : null),
+          row['审批人'] || null, row['审批时间'] || null,
+          row['维修厂商'] || null, row['维修费用'] ? parseFloat(row['维修费用']) : null,
+          row['排期日期'] || null, row['预计归还日期'] || null, row['实际归还日期'] || null,
+          row['维修备注'] || null, 'csv_import', createdAt, updatedAt]
+      );
+
+      existingOrderNos.add(orderNo);
+      imported.push({ row: i + 1, id: orderId, order_no: orderNo });
+
+      addRepairApproval(orderId, 'import', userId, userName, 'CSV导入历史维修单', {
+        source_row: i + 1, original_status: status
+      });
+    } catch (e) {
+      errors.push({ row: i + 1, error: e.message });
+    }
+  }
+
+  addLog('import_repair_orders', userId, userName, {
+    total_rows: lines.length - 1, imported: imported.length, skipped: skipped.length, errors: errors.length
+  });
+  forceSave();
+
+  return {
+    ok: true,
+    imported: imported.length,
+    skipped: skipped.length,
+    errors: errors.length,
+    imported_items: imported,
+    skipped_items: skipped,
+    error_items: errors
+  };
+}
+
+function repairOrdersToCsv(orders) {
+  const headers = ['维修单号', '状态', '器材ID', '器材名称', '数量',
+    '课程ID', '课程名称', '班级ID', '班级名称',
+    '故障现象', '处理建议', '处理决定', '决定原因',
+    '上报人ID', '上报人', '审批人ID', '审批人', '审批时间',
+    '维修厂商', '维修费用', '排期日期', '预计归还日期', '实际归还日期',
+    '维修备注', '创建时间', '更新时间'];
+
+  const rows = [headers];
+
+  orders.forEach(o => {
+    rows.push([
+      o.order_no || '', o.status || '', o.equipment_id || '', o.equipment_name || '', o.qty || '',
+      o.course_id || '', o.course_name || '', o.class_id || '', o.class_name || '',
+      o.fault_phenomenon || '', o.handling_suggestion || '', o.decision || '', o.decision_reason || '',
+      o.reporter_id || '', o.reporter_name || '', o.approver_id || '', o.approver_name || '', o.approved_at || '',
+      o.repair_vendor || '', o.repair_cost || '', o.scheduled_date || '', o.estimated_return_date || '', o.actual_return_date || '',
+      o.repair_note || '', o.created_at || '', o.updated_at || ''
+    ]);
+  });
+
+  return rows.map(r => r.map(cell => {
+    const s = String(cell == null ? '' : cell);
+    return s.includes(',') || s.includes('"') || s.includes('\n')
+      ? `"${s.replace(/"/g, '""')}"` : s;
+  }).join(',')).join('\n');
+}
+
 module.exports = {
   initDatabase,
   run,
@@ -2002,5 +2873,28 @@ module.exports = {
   correctInventoryItem,
   resolveConflictAndCorrect,
   cancelInventoryBatch,
-  getInventoryItemsForTeacher
+  getInventoryItemsForTeacher,
+  generateRepairOrderNo,
+  checkEquipmentInTransit,
+  createRepairOrder,
+  addRepairApproval,
+  getRepairApprovalsByOrderId,
+  getRepairOrderById,
+  getRepairOrders,
+  getRepairOrdersForTeacher,
+  reviewRepairOrder,
+  deactivateEquipment,
+  arrangeRepair,
+  arrangeReplacement,
+  scrapEquipment,
+  returnRepairedEquipment,
+  cancelRepairOrder,
+  revokeRepairOrder,
+  createRepairSchedule,
+  updateRepairSchedule,
+  getRepairSchedules,
+  getRepairStats,
+  importRepairOrders,
+  repairOrdersToCsv,
+  canTransitionStatus
 };

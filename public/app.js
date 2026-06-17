@@ -15,6 +15,20 @@ const STATUS_CLASS = {
 const LOSS_STATUS_MAP = { pending: '待审批', approved: '已审批', rejected: '已驳回' };
 const LOSS_STATUS_CLASS = { pending: 'status-pending', approved: 'status-approved', rejected: 'status-rejected' };
 const ROLE_MAP = { admin: '管理员', teacher: '教师', lab_manager: '实验员' };
+const REPAIR_STATUS_MAP = {
+  pending: '待审核', reviewing: '审核中', deactivated: '已停用',
+  repairing: '维修中', replacing: '换件中', returned: '已回库',
+  scrapped: '已报废', cancelled: '已取消', revoked: '已撤销'
+};
+const REPAIR_STATUS_CLASS = {
+  pending: 'status-pending', reviewing: 'status-partial', deactivated: 'status-rejected',
+  repairing: 'status-approved', replacing: 'status-approved', returned: 'status-returned',
+  scrapped: 'status-cancelled', cancelled: 'status-cancelled', revoked: 'status-cancelled'
+};
+const REPAIR_DECISION_MAP = {
+  deactivate: '立即停用', repair: '安排维修', replace: '安排换件',
+  scrap: '报废', cancel: '取消', pending: '待决定'
+};
 
 async function api(method, url, body) {
   const opts = { method, headers: { 'Content-Type': 'application/json' }, credentials: 'include' };
@@ -68,6 +82,7 @@ async function loadPage(name) {
     else if (name === 'settlements') await loadSettlements();
     else if (name === 'makeup-center') await loadMakeupCenter();
     else if (name === 'inventory-center') await loadInventoryCenter();
+    else if (name === 'repair-center') await loadRepairCenter();
     else if (name === 'export-history') await loadExportHistory();
     else if (name === 'ledger') await loadLedger();
     else if (name === 'logs') await loadLogs();
@@ -2017,6 +2032,483 @@ function applyMakeupLogFilters() {
 function resetMakeupLogFilters() {
   makeupLogFilters = { action: '', user_id: '', keyword: '', date_start: '', date_end: '' };
   loadMakeupLogs();
+}
+
+let repairCache = { courses: [], equipment: [], orders: [] };
+
+async function loadRepairCenter() {
+  repairCache.courses = await api('GET', '/api/courses');
+  repairCache.equipment = await api('GET', '/api/equipment');
+
+  document.querySelectorAll('.makeup-tab[data-rtab]').forEach(t => {
+    t.onclick = () => switchRepairTab(t.dataset.rtab);
+  });
+
+  if (['admin','lab_manager'].includes(currentUser.role)) {
+    document.querySelectorAll('.nav-admin-only[data-rtab]').forEach(t => { t.style.display = 'inline-block'; });
+  }
+
+  await loadRepairStats();
+  await loadRepairList();
+}
+
+function switchRepairTab(tabName) {
+  document.querySelectorAll('.makeup-tab[data-rtab]').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.makeup-tab-panel').forEach(p => p.classList.remove('active'));
+  document.querySelector(`[data-rtab="${tabName}"]`).classList.add('active');
+  document.getElementById(`repair-tab-${tabName}`).classList.add('active');
+
+  if (tabName === 'list') loadRepairList();
+  else if (tabName === 'submit') loadRepairSubmitForm();
+  else if (tabName === 'schedules') loadRepairSchedules();
+  else if (tabName === 'import') loadRepairImportExport();
+  else if (tabName === 'approvals') loadRepairApprovals();
+}
+
+async function loadRepairStats() {
+  try {
+    const stats = await api('GET', '/api/repair/stats');
+    const sg = document.getElementById('repair-stats');
+    sg.innerHTML = `
+      <div class="stat-card"><div class="stat-value">${stats.total||0}</div><div class="stat-label">维修单总数</div></div>
+      <div class="stat-card"><div class="stat-value">${stats.pending||0}</div><div class="stat-label">待处理</div></div>
+      <div class="stat-card"><div class="stat-value">${stats.repairing||0}</div><div class="stat-label">维修中</div></div>
+      <div class="stat-card"><div class="stat-value">${stats.returned||0}</div><div class="stat-label">已回库</div></div>
+      <div class="stat-card"><div class="stat-value">${stats.scrapped||0}</div><div class="stat-label">已报废</div></div>
+    `;
+  } catch(e) { console.error(e); }
+}
+
+async function loadRepairList() {
+  const list = await api('GET', '/api/repair/orders');
+  repairCache.orders = list;
+
+  const fb = document.getElementById('repair-filters');
+  fb.innerHTML = `
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <select id="rf-status" style="padding:6px 8px;border:1px solid #ddd;border-radius:4px">
+        <option value="">全部状态</option>
+        ${Object.entries(REPAIR_STATUS_MAP).map(([k,v]) => `<option value="${k}">${v}</option>`).join('')}
+      </select>
+      <input type="text" id="rf-kw" placeholder="搜索单号/器材/课程..." style="width:200px;padding:6px 8px;border:1px solid #ddd;border-radius:4px">
+      <button class="btn btn-primary" onclick="applyRepairFilters()">🔍 筛选</button>
+    </div>`;
+
+  renderRepairList(list);
+}
+
+function applyRepairFilters() {
+  const status = document.getElementById('rf-status').value;
+  const kw = document.getElementById('rf-kw').value.trim().toLowerCase();
+  let list = repairCache.orders;
+  if (status) list = list.filter(o => o.status === status);
+  if (kw) list = list.filter(o =>
+    o.order_no.toLowerCase().includes(kw) ||
+    o.equipment_name.toLowerCase().includes(kw) ||
+    o.course_name.toLowerCase().includes(kw)
+  );
+  renderRepairList(list);
+}
+
+function renderRepairList(list) {
+  if (list.length === 0) {
+    document.getElementById('repair-list').innerHTML = '<div class="empty-state">暂无维修单</div>';
+    return;
+  }
+
+  let h = '<table class="data-table"><thead><tr><th>单号</th><th>课程</th><th>器材</th><th>数量</th><th>故障现象</th><th>状态</th><th>上报人</th><th>操作</th></tr></thead><tbody>';
+  list.forEach(o => {
+    h += `<tr>
+      <td><a href="#" onclick="showRepairDetail(${o.id});return false">${o.order_no}</a></td>
+      <td>${escapeHtml(o.course_name)}</td>
+      <td>${escapeHtml(o.equipment_name)}</td>
+      <td>${o.qty}</td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis">${escapeHtml(o.fault_phenomenon||'')}</td>
+      <td><span class="status-badge ${REPAIR_STATUS_CLASS[o.status]}">${REPAIR_STATUS_MAP[o.status]}</span></td>
+      <td>${escapeHtml(o.reporter_name||'')}</td>
+      <td class="action-cell">`;
+    h += `<button class="btn btn-sm btn-info" onclick="showRepairDetail(${o.id})">详情</button>`;
+    h += '</td></tr>';
+  });
+  h += '</tbody></table>';
+  document.getElementById('repair-list').innerHTML = h;
+}
+
+async function loadRepairSubmitForm() {
+  const isTeacher = currentUser.role === 'teacher';
+  const myCourses = isTeacher ? repairCache.courses.filter(c => c.teacher_id === currentUser.id) : repairCache.courses;
+
+  let h = '<form id="repair-submit-form-inner">';
+  h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">';
+  h += '<div class="form-group"><label>课程 *</label><select name="course_id" required>';
+  myCourses.forEach(c => { h += `<option value="${c.id}">${escapeHtml(c.name)}</option>`; });
+  h += '</select></div>';
+  h += '<div class="form-group"><label>器材 *</label><select name="equipment_id" required>';
+  repairCache.equipment.forEach(e => { h += `<option value="${e.id}">${escapeHtml(e.name)} (可用:${e.available_qty})</option>`; });
+  h += '</select></div>';
+  h += '<div class="form-group"><label>数量 *</label><input type="number" name="qty" min="1" value="1" required></div>';
+  h += '</div>';
+  h += '<div class="form-group"><label>故障现象 *</label><textarea name="fault_phenomenon" rows="3" required placeholder="请详细描述故障现象..."></textarea></div>';
+  h += '<div class="form-group"><label>处理建议</label><textarea name="handling_suggestion" rows="2" placeholder="您建议如何处理（可选）..."></textarea></div>';
+  h += '<button type="submit" class="btn btn-primary btn-block">提交故障单</button></form>';
+
+  document.getElementById('repair-submit-form').innerHTML = h;
+  document.getElementById('repair-submit-form-inner').onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    try {
+      const data = Object.fromEntries(fd);
+      const conflict = await api('GET', `/api/repair/check-conflict/${data.equipment_id}`);
+      if (conflict.hasConflict) {
+        if (!confirm(`该器材存在流转冲突：${conflict.message}\n是否仍要提交故障单？`)) return;
+      }
+      const r = await api('POST', '/api/repair/orders', data);
+      toast(`故障单提交成功：${r.order_no}`);
+      switchRepairTab('list');
+      loadRepairStats();
+    } catch(err) { toast(err.message, 'error'); }
+  };
+}
+
+async function showRepairDetail(id) {
+  const d = await api('GET', `/api/repair/orders/${id}`);
+  const isAdmin = ['admin','lab_manager'].includes(currentUser.role);
+  const isOwner = d.reporter_id === currentUser.id;
+  const canEdit = isAdmin || (isOwner && ['pending','reviewing'].includes(d.status));
+
+  let h = '';
+  h += `<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px">
+    <div style="background:#f8f9fa;padding:12px;border-radius:6px;border:1px solid #e9ecef">
+      <div style="font-size:12px;color:#666;margin-bottom:4px">维修单号</div>
+      <div style="font-weight:bold">${escapeHtml(d.order_no)}</div>
+    </div>
+    <div style="background:#f8f9fa;padding:12px;border-radius:6px;border:1px solid #e9ecef">
+      <div style="font-size:12px;color:#666;margin-bottom:4px">状态</div>
+      <div style="font-weight:bold"><span class="status-badge ${REPAIR_STATUS_CLASS[d.status]}">${REPAIR_STATUS_MAP[d.status]}</span></div>
+    </div>
+    <div style="background:#f8f9fa;padding:12px;border-radius:6px;border:1px solid #e9ecef">
+      <div style="font-size:12px;color:#666;margin-bottom:4px">处理决定</div>
+      <div style="font-weight:bold">${d.decision?REPAIR_DECISION_MAP[d.decision]:'待决定'}</div>
+    </div>
+  </div>`;
+
+  h += '<table class="data-table compact" style="margin-bottom:16px"><tbody>';
+  h += `<tr><th style="width:120px">上报人</th><td>${escapeHtml(d.reporter_name||'')} (ID: ${d.reporter_id})</td></tr>`;
+  h += `<tr><th>课程 / 器材</th><td>${escapeHtml(d.course_name)} / ${escapeHtml(d.equipment_name)} × ${d.qty}</td></tr>`;
+  h += `<tr><th>故障现象</th><td>${escapeHtml(d.fault_phenomenon||'')}</td></tr>`;
+  if (d.handling_suggestion) h += `<tr><th>处理建议</th><td>${escapeHtml(d.handling_suggestion)}</td></tr>`;
+  if (d.approver_name) h += `<tr><th>审批人</th><td>${escapeHtml(d.approver_name)}${d.approval_comment?' / 意见: '+escapeHtml(d.approval_comment):''}</td></tr>`;
+  if (d.repair_vendor) h += `<tr><th>维修厂商</th><td>${escapeHtml(d.repair_vendor)}${d.repair_cost?' / 费用: ¥'+d.repair_cost:''}</td></tr>`;
+  if (d.return_note) h += `<tr><th>回库备注</th><td>${escapeHtml(d.return_note)}</td></tr>`;
+  h += `<tr><th>创建时间</th><td>${new Date(d.created_at).toLocaleString()}</td></tr>`;
+  if (d.updated_at) h += `<tr><th>更新时间</th><td>${new Date(d.updated_at).toLocaleString()}</td></tr>`;
+  h += '</tbody></table>';
+
+  if (d.approvals && d.approvals.length) {
+    h += '<h4 style="margin:16px 0 8px">审批记录</h4>';
+    h += '<table class="data-table compact"><thead><tr><th>时间</th><th>动作</th><th>操作人</th><th>备注</th></tr></thead><tbody>';
+    const actMap = {
+      create: '创建', review: '审核', deactivate: '停用', repair: '安排维修',
+      replace: '安排换件', scrap: '报废', return: '回库', cancel: '取消',
+      revoke: '撤销', schedule: '排期', import: '导入'
+    };
+    d.approvals.forEach(a => {
+      h += `<tr><td>${new Date(a.created_at).toLocaleString()}</td><td>${actMap[a.action]||a.action}</td><td>${escapeHtml(a.operator_name||'')}</td><td>${escapeHtml(a.comment||'')}</td></tr>`;
+    });
+    h += '</tbody></table>';
+  }
+
+  h += '<div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap">';
+  if (isAdmin && d.status === 'pending') {
+    h += `<button class="btn btn-info" onclick="repairAction(${d.id}, 'review')">开始审核</button>`;
+  }
+  if (isAdmin && ['reviewing','deactivated'].includes(d.status)) {
+    h += `<button class="btn btn-warning" onclick="showRepairActionModal(${d.id}, 'deactivate')">停用器材</button>`;
+    h += `<button class="btn btn-success" onclick="showRepairActionModal(${d.id}, 'repair')">安排维修</button>`;
+    h += `<button class="btn btn-success" onclick="showRepairActionModal(${d.id}, 'replace')">安排换件</button>`;
+    h += `<button class="btn btn-danger" onclick="showRepairActionModal(${d.id}, 'scrap')">报废器材</button>`;
+  }
+  if (isAdmin && ['repairing','replacing'].includes(d.status)) {
+    h += `<button class="btn btn-success" onclick="showRepairActionModal(${d.id}, 'return')">回库复用</button>`;
+  }
+  if (isAdmin && !['returned','scrapped','cancelled','revoked'].includes(d.status)) {
+    h += `<button class="btn btn-danger" onclick="showRepairActionModal(${d.id}, 'cancel')">取消</button>`;
+  }
+  if (isAdmin && ['deactivated','repairing','replacing'].includes(d.status)) {
+    h += `<button class="btn btn-warning" onclick="showRepairActionModal(${d.id}, 'revoke')">撤销并恢复库存</button>`;
+  }
+  if (isOwner && ['pending','reviewing'].includes(d.status) && !isAdmin) {
+    h += `<button class="btn" style="background:#95a5a6;color:#fff" onclick="showRepairActionModal(${d.id}, 'cancel')">取消申请</button>`;
+  }
+  h += '</div>';
+
+  showModal(`维修单详情 ${d.order_no}`, h);
+}
+
+async function repairAction(id, action) {
+  try {
+    await api('PUT', `/api/repair/orders/${id}/${action}`);
+    toast('操作成功');
+    closeModal();
+    loadRepairList();
+    loadRepairStats();
+  } catch(err) { toast(err.message, 'error'); }
+}
+
+function showRepairActionModal(id, action) {
+  let title = '', h = '';
+  const actionMap = {
+    deactivate: { title: '停用器材', fields: ['reason'] },
+    repair: { title: '安排维修', fields: ['vendor', 'scheduled_date', 'estimated_cost', 'reason'] },
+    replace: { title: '安排换件', fields: ['reason'] },
+    scrap: { title: '报废器材', fields: ['reason'] },
+    return: { title: '回库复用', fields: ['actual_cost', 'return_note', 'actual_return_date'] },
+    cancel: { title: '取消维修单', fields: ['reason'] },
+    revoke: { title: '撤销并恢复库存', fields: ['reason'] }
+  };
+
+  const cfg = actionMap[action];
+  title = cfg.title;
+
+  h = `<form id="repair-action-form">`;
+  if (cfg.fields.includes('vendor')) {
+    h += '<div class="form-group"><label>维修厂商</label><input type="text" name="vendor" placeholder="如：XX仪器维修公司"></div>';
+  }
+  if (cfg.fields.includes('scheduled_date')) {
+    h += '<div class="form-group"><label>计划维修日期</label><input type="date" name="scheduled_date"></div>';
+  }
+  if (cfg.fields.includes('estimated_cost')) {
+    h += '<div class="form-group"><label>预估费用 (元)</label><input type="number" name="estimated_cost" min="0" step="0.01"></div>';
+  }
+  if (cfg.fields.includes('actual_cost')) {
+    h += '<div class="form-group"><label>实际费用 (元)</label><input type="number" name="actual_cost" min="0" step="0.01"></div>';
+  }
+  if (cfg.fields.includes('return_note')) {
+    h += '<div class="form-group"><label>回库备注</label><textarea name="return_note" rows="2" placeholder="维修情况说明..."></textarea></div>';
+  }
+  if (cfg.fields.includes('actual_return_date')) {
+    h += '<div class="form-group"><label>实际归还日期</label><input type="date" name="actual_return_date"></div>';
+  }
+  if (cfg.fields.includes('reason')) {
+    h += `<div class="form-group"><label>${action==='revoke'?'撤销原因':(action==='cancel'?'取消原因':'处理原因')} *</label><textarea name="reason" rows="3" required placeholder="请说明原因..."></textarea></div>`;
+  }
+  h += `<div style="display:flex;gap:8px;margin-top:12px">
+    <button type="submit" class="btn btn-primary" style="flex:1">确认${cfg.title}</button>
+    <button type="button" class="btn" style="flex:1;background:#eee;color:#555" onclick="closeModal()">取消</button>
+  </div></form>`;
+
+  showModal(title, h);
+  document.getElementById('repair-action-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const data = Object.fromEntries(fd);
+    try {
+      await api('PUT', `/api/repair/orders/${id}/${action}`, data);
+      toast('操作成功');
+      closeModal();
+      loadRepairList();
+      loadRepairStats();
+    } catch(err) { toast(err.message, 'error'); }
+  };
+}
+
+async function loadRepairSchedules() {
+  const list = await api('GET', '/api/repair/schedules');
+  const ab = document.getElementById('repair-schedule-actions');
+  ab.innerHTML = '<button class="btn btn-primary" onclick="showCreateScheduleModal()">+ 新建排期</button>';
+
+  if (list.length === 0) {
+    document.getElementById('repair-schedule-list').innerHTML = '<div class="empty-state">暂无维修排期</div>';
+    return;
+  }
+
+  let h = '<table class="data-table"><thead><tr><th>ID</th><th>维修单号</th><th>器材</th><th>维修厂商</th><th>计划日期</th><th>预估费用</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+  list.forEach(s => {
+    h += `<tr>
+      <td>${s.id}</td>
+      <td>${escapeHtml(s.order_no||'')}</td>
+      <td>${escapeHtml(s.equipment_name||'')}</td>
+      <td>${escapeHtml(s.vendor||'')}</td>
+      <td>${s.scheduled_date||''}</td>
+      <td>${s.estimated_cost?'¥'+s.estimated_cost:''}</td>
+      <td>${s.status||'待安排'}</td>
+      <td class="action-cell">
+        <button class="btn btn-sm btn-info" onclick="showEditScheduleModal(${s.id})">编辑</button>
+      </td>
+    </tr>`;
+  });
+  h += '</tbody></table>';
+  document.getElementById('repair-schedule-list').innerHTML = h;
+}
+
+function showCreateScheduleModal() {
+  let h = '<form id="schedule-form">';
+  h += '<div class="form-group"><label>关联维修单</label><select name="order_id" required>';
+  repairCache.orders.filter(o => ['pending','reviewing','deactivated','repairing'].includes(o.status)).forEach(o => {
+    h += `<option value="${o.id}">${o.order_no} - ${o.equipment_name}</option>`;
+  });
+  h += '</select></div>';
+  h += '<div class="form-group"><label>维修厂商 *</label><input type="text" name="vendor" required></div>';
+  h += '<div class="form-group"><label>计划维修日期</label><input type="date" name="scheduled_date"></div>';
+  h += '<div class="form-group"><label>预估费用 (元)</label><input type="number" name="estimated_cost" min="0" step="0.01"></div>';
+  h += '<div class="form-group"><label>备注</label><textarea name="notes" rows="2"></textarea></div>';
+  h += '<button type="submit" class="btn btn-primary btn-block">创建排期</button></form>';
+  showModal('新建维修排期', h);
+  document.getElementById('schedule-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    try {
+      await api('POST', '/api/repair/schedules', Object.fromEntries(fd));
+      toast('排期创建成功');
+      closeModal();
+      loadRepairSchedules();
+    } catch(err) { toast(err.message, 'error'); }
+  };
+}
+
+async function showEditScheduleModal(id) {
+  const schedules = await api('GET', '/api/repair/schedules');
+  const s = schedules.find(x => x.id === id);
+  if (!s) return;
+
+  let h = `<form id="schedule-edit-form">
+    <div class="form-group"><label>维修厂商</label><input type="text" name="vendor" value="${escapeHtml(s.vendor||'')}"></div>
+    <div class="form-group"><label>计划维修日期</label><input type="date" name="scheduled_date" value="${s.scheduled_date||''}"></div>
+    <div class="form-group"><label>预估费用 (元)</label><input type="number" name="estimated_cost" min="0" step="0.01" value="${s.estimated_cost||''}"></div>
+    <div class="form-group"><label>实际费用 (元)</label><input type="number" name="actual_cost" min="0" step="0.01" value="${s.actual_cost||''}"></div>
+    <div class="form-group"><label>状态</label><select name="status">
+      <option value="scheduled" ${s.status==='scheduled'?'selected':''}>已排期</option>
+      <option value="in_progress" ${s.status==='in_progress'?'selected':''}>维修中</option>
+      <option value="completed" ${s.status==='completed'?'selected':''}>已完成</option>
+      <option value="cancelled" ${s.status==='cancelled'?'selected':''}>已取消</option>
+    </select></div>
+    <div class="form-group"><label>备注</label><textarea name="notes" rows="2">${escapeHtml(s.notes||'')}</textarea></div>
+    <button type="submit" class="btn btn-primary btn-block">保存修改</button>
+  </form>`;
+  showModal('编辑维修排期', h);
+  document.getElementById('schedule-edit-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    try {
+      await api('PUT', `/api/repair/schedules/${id}`, Object.fromEntries(fd));
+      toast('排期更新成功');
+      closeModal();
+      loadRepairSchedules();
+    } catch(err) { toast(err.message, 'error'); }
+  };
+}
+
+function loadRepairImportExport() {
+  const ab = document.getElementById('repair-import-actions');
+  ab.innerHTML = `
+    <button class="btn btn-success" onclick="exportRepairCsv()">📤 导出 CSV</button>
+    <button class="btn btn-primary" onclick="document.getElementById('repair-csv-input').click()">📥 导入 CSV</button>
+    <input type="file" id="repair-csv-input" accept=".csv" style="display:none" onchange="importRepairCsv(event)">
+  `;
+
+  let h = '';
+  h += '<div class="card" style="margin-bottom:16px">';
+  h += '<h4 style="margin:0 0 12px 0">CSV 导入说明</h4>';
+  h += '<p style="color:#666;margin:4px 0">CSV 文件需包含以下列：<b>order_no, course_id, equipment_id, qty, fault_phenomenon, handling_suggestion, status, decision, repair_vendor, repair_cost, created_at</b></p>';
+  h += '<p style="color:#666;margin:4px 0">必填列：order_no, course_id, equipment_id, qty, fault_phenomenon, status</p>';
+  h += '<p style="color:#666;margin:4px 0">状态可选值：pending, reviewing, deactivated, repairing, replacing, returned, scrapped, cancelled, revoked</p>';
+  h += '<p style="color:#d9534f;margin:4px 0">⚠️ 重复单号、状态倒退、权限越界都会被拦截并给出详细反馈</p>';
+  h += '</div>';
+
+  h += '<div class="card">';
+  h += '<h4 style="margin:0 0 12px 0">导入结果预览</h4>';
+  h += '<div id="repair-import-result" class="empty-state">请选择 CSV 文件进行导入</div>';
+  h += '</div>';
+
+  document.getElementById('repair-import-form').innerHTML = h;
+}
+
+async function exportRepairCsv() {
+  try {
+    const res = await fetch('/api/repair/export/csv', { credentials: 'include' });
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `repair_orders_${new Date().toISOString().slice(0,10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast('导出成功');
+  } catch(err) { toast(err.message, 'error'); }
+}
+
+async function importRepairCsv(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+
+  try {
+    const text = await file.text();
+    const r = await api('POST', '/api/repair/import/csv', { csvData: text });
+
+    let h = '<div style="margin-bottom:12px">';
+    h += `<p><b>导入结果：</b>成功 ${r.success} 条，跳过 ${r.skipped} 条，失败 ${r.failed} 条</p>`;
+    if (r.errors && r.errors.length) {
+      h += '<div style="background:#ffebee;padding:8px;border-radius:4px;margin:8px 0;max-height:200px;overflow-y:auto">';
+      h += '<b style="color:#c62828">错误详情：</b><ul style="margin:4px 0;padding-left:20px">';
+      r.errors.forEach(err => { h += `<li style="color:#c62828">${escapeHtml(err)}</li>`; });
+      h += '</ul></div>';
+    }
+    if (r.warnings && r.warnings.length) {
+      h += '<div style="background:#fff8e1;padding:8px;border-radius:4px;margin:8px 0;max-height:200px;overflow-y:auto">';
+      h += '<b style="color:#f57f17">警告信息：</b><ul style="margin:4px 0;padding-left:20px">';
+      r.warnings.forEach(w => { h += `<li style="color:#f57f17">${escapeHtml(w)}</li>`; });
+      h += '</ul></div>';
+    }
+    h += '</div>';
+
+    document.getElementById('repair-import-result').innerHTML = h;
+    if (r.success > 0) {
+      loadRepairList();
+      loadRepairStats();
+    }
+  } catch(err) { toast(err.message, 'error'); }
+  event.target.value = '';
+}
+
+async function loadRepairApprovals() {
+  const list = await api('GET', '/api/repair/orders');
+  let allApprovals = [];
+  for (const o of list) {
+    try {
+      const approvals = await api('GET', `/api/repair/orders/${o.id}/approvals`);
+      approvals.forEach(a => {
+        a.order_no = o.order_no;
+        a.equipment_name = o.equipment_name;
+      });
+      allApprovals = allApprovals.concat(approvals);
+    } catch(e) {}
+  }
+
+  allApprovals.sort((a,b) => new Date(b.created_at) - new Date(a.created_at));
+
+  if (allApprovals.length === 0) {
+    document.getElementById('repair-approval-list').innerHTML = '<div class="empty-state">暂无审批记录</div>';
+    return;
+  }
+
+  let h = '<table class="data-table"><thead><tr><th>时间</th><th>维修单号</th><th>器材</th><th>动作</th><th>操作人</th><th>备注</th></tr></thead><tbody>';
+  const actMap = {
+    create: '创建', review: '审核', deactivate: '停用', repair: '安排维修',
+    replace: '安排换件', scrap: '报废', return: '回库', cancel: '取消',
+    revoke: '撤销', schedule: '排期', import: '导入'
+  };
+  allApprovals.forEach(a => {
+    h += `<tr>
+      <td>${new Date(a.created_at).toLocaleString()}</td>
+      <td>${escapeHtml(a.order_no||'')}</td>
+      <td>${escapeHtml(a.equipment_name||'')}</td>
+      <td>${actMap[a.action]||a.action}</td>
+      <td>${escapeHtml(a.operator_name||'')}</td>
+      <td>${escapeHtml(a.comment||'')}</td>
+    </tr>`;
+  });
+  h += '</tbody></table>';
+  document.getElementById('repair-approval-list').innerHTML = h;
 }
 
 (async () => {
